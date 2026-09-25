@@ -42,13 +42,37 @@ namespace SephiriaTrial
     }
 
     // The existing return-portal NetworkIdentity is reused for all trial portal
-    // variants.  The synchronized route tells every client which interaction to
-    // attach after its local visual has been created.
+    // variants. The mod assembly is not processed by Mirror's Weaver, so this
+    // route needs explicit serialization to reach remote clients.
     public class TrialPortalRoute : NetworkBehaviour
     {
         // 0 = save and return to town, 1 = battle to shared reward room,
         // 2 = reward room back to battle.
-        [SyncVar] public byte route;
+        public byte route;
+
+        public override void OnSerialize(NetworkWriter writer, bool initialState)
+        {
+            writer.WriteByte(route);
+        }
+
+        public override void OnDeserialize(NetworkReader reader, bool initialState)
+        {
+            route = reader.ReadByte();
+            if (route == 1) gameObject.name = "Trial_BattleToReward_Portal";
+            else if (route == 2) gameObject.name = "Trial_RewardToBattle_Portal";
+            else gameObject.name = "Trial_SaveReturn_Portal";
+            Interactable? interactable = GetComponent<Interactable>();
+            if (interactable != null)
+                EndlessMod.ConfigureTrialPortalInteraction(interactable, route);
+        }
+
+        [Server]
+        public void SetRoute(byte value)
+        {
+            if (route == value) return;
+            route = value;
+            SetDirty();
+        }
     }
 
     // The dedicated entrance is built by the mod, not cloned from the town
@@ -100,7 +124,7 @@ namespace SephiriaTrial
         {
             if (gameObject.name == "TrialReturnPortal_RuntimePrefab") yield break;
             WaitForSeconds portalRetryDelay = new WaitForSeconds(0.25f);
-            // Let Mirror apply TrialPortalRoute.SyncVars before selecting the
+            // Let Mirror deserialize TrialPortalRoute before selecting the
             // client-side interaction callback.
             yield return null;
 
@@ -334,16 +358,12 @@ namespace SephiriaTrial
         private static readonly List<string> Pool_Tier101 = new List<string> { "BombDemon", "BombDemon(S)", "ChakramThrower", "ChakramThrower(S)", "CrystalDemon", "CrystalDemon(S)", "LanternDemon", "LanternDemon(S)", "SkeletonMouseMage", "EyeOfDeath", "EyeOfDeath(S)", "FanaticCat", "FanaticCat(S)", "FloatingEye_DeepCave", "FloatingEye_DeepCave(S)", "SlimeMagma", "SpikeEye(S)", "FlowerSkeleton", "FlowerSkeleton(S)", "GoatSkeletonDeepCave", "HugeSkeleton", "LizardSkeleton", "MushroomHowitzer", "MushroomHowitzer(S)", "PoisonDemon", "RootMage", "RootMage(S)" };
         private static readonly Dictionary<int, List<string>> FilteredTrialMonsterPools =
             new Dictionary<int, List<string>>();
-
-        private static FieldInfo? cachedFNetworkMaxHp;
-        private static FieldInfo? cachedFMaxHp;
-        private static FieldInfo? cachedFNetworkHp;
-        private static FieldInfo? cachedFHp;
-        private static bool isHpFieldsCached = false;
-
-        private static FieldInfo? cachedFNetworkIsInBattle;
-        private static FieldInfo? cachedFIsInBattle;
-        private static bool isBattleFieldsCached = false;
+        // Keep the trial's contribution to UnitAvatar.isInBattle separate from
+        // the native PlayerBattleChecker and other room spawners. Each source
+        // must release only the StartBattle call it made itself.
+        private static readonly HashSet<PlayerAvatar> TrialBattleParticipants = new HashSet<PlayerAvatar>();
+        private static readonly HashSet<PlayerAvatar> TrialBattleEligiblePlayers = new HashSet<PlayerAvatar>();
+        private static readonly List<PlayerAvatar> TrialBattleParticipantsToRelease = new List<PlayerAvatar>();
 
         // [하모니 제거 및 최적화용 필드]
         private static GameObject? _lastTrackedTablet = null;
@@ -476,6 +496,7 @@ namespace SephiriaTrial
             EnsureRuntimeTrialReturnPortalPrefab();
             EnsureRuntimeTrialControllerPrefab();
             RegisterCachedTrialNetworkPrefabs();
+            TrialNetworkBridge.EnsureRegistered();
             SceneManager.activeSceneChanged += OnActiveSceneChanged;
 
             GameObject? pf = Resources.Load<GameObject>("Sephirite/Sephirite_Tablet");
@@ -557,6 +578,9 @@ namespace SephiriaTrial
         protected override void OnModUnloaded()
         {
             if (!ReferenceEquals(Instance, this)) return;
+            TrialAutoUpdater.SuspendUntilNextLoad();
+            SetAllPlayersBattleState(false);
+            TrialNetworkBridge.Shutdown();
             if (_localizationReadyHandler != null)
                 HorayModAPI.OnLocalizationReady -= _localizationReadyHandler;
             HorayModAPI.OnFloorAllocatedServerside -= OnFloorAllocatedServerside;
@@ -669,6 +693,7 @@ namespace SephiriaTrial
             float now = Time.unscaledTime;
             if (now < _nextTrialFastTickTime) return;
             _nextTrialFastTickTime = now + 0.2f;
+            TrialNetworkBridge.EnsureRegistered();
 
             if (_trialLevelCapActive && !NetworkClient.active && !NetworkServer.active)
                 RestoreNativeLevelCap();
@@ -694,8 +719,10 @@ namespace SephiriaTrial
         private static void MonitorGameWorldObjects()
         {
             EnsureLocalTrialTabletInteraction();
+            TrialController.Instance?.RefreshLocalTrialState();
             // Trial monsters are registered at the point of spawning.
             if (!NetworkServer.active) return;
+            ReconcileTrialPlayerBattleState();
             KeepSavedTrialLobbyOpenForRejoin();
             RefreshTrialSephiriteRewardObservers();
 
@@ -2161,7 +2188,6 @@ namespace SephiriaTrial
 
         private static void EnsureLocalTrialTabletInteraction()
         {
-            if (TrialTablet != null) return;
             string guid = _cachedLocalPlayer?.currentFloorGuid ?? string.Empty;
             if (!IsTrialBattleFloorGuid(guid)) return;
             if (Time.unscaledTime < _nextTrialTabletSearchTime) return;
@@ -2177,8 +2203,17 @@ namespace SephiriaTrial
                 _trialTabletSearchFloor = floor;
             }
             Vector3 center = _trialTabletSearchCenter;
+            if (TrialTablet != null)
+            {
+                if ((TrialTablet.transform.position - center).sqrMagnitude < 2.25f)
+                    return;
+                // A previous battle floor may remain loaded while the next
+                // floor's tablet is spawned at a different world position.
+                TrialTablet = null;
+            }
             Sephirite? tablet = null;
-            foreach (Sephirite candidate in UnityEngine.Object.FindObjectsByType<Sephirite>(FindObjectsSortMode.None))
+            foreach (Sephirite candidate in UnityEngine.Object.FindObjectsByType<Sephirite>(
+                         FindObjectsInactive.Include, FindObjectsSortMode.None))
             {
                 if (candidate == null) continue;
                 string name = candidate.gameObject.name;
@@ -2320,7 +2355,8 @@ namespace SephiriaTrial
                 UnityEngine.Object.Destroy(portal);
                 return;
             }
-            portalRoute.route = route;
+            portalRoute.SetRoute(route);
+            portal.SetActive(true);
             CopyCachedTownPortalPresentation(portal);
             Interactable? interactable = portal.GetComponent<Interactable>();
             if (interactable == null)
@@ -2347,7 +2383,7 @@ namespace SephiriaTrial
                 return;
             }
             Debug.Log($"[시련] 클라이언트에서 보상 이동 명령 전송: actor={actor?.name ?? "null"}");
-            controller.CmdMoveLocalPlayerToRewardFloor();
+            TrialNetworkBridge.SendAction(TrialNetworkBridge.MoveToReward);
         }
 
         internal static void RequestMoveToBattleFloor(GameObject actor)
@@ -2360,7 +2396,7 @@ namespace SephiriaTrial
                 return;
             }
             Debug.Log($"[시련] 클라이언트에서 전투 이동 명령 전송: actor={actor?.name ?? "null"}");
-            controller.CmdMoveLocalPlayerToBattleFloor();
+            TrialNetworkBridge.SendAction(TrialNetworkBridge.MoveToBattle);
         }
 
         private static bool TryMoveLocalHostActor(GameObject actor, bool toRewardFloor)
@@ -3472,8 +3508,15 @@ namespace SephiriaTrial
             }
         }
 
-        public void ShowTrialTablet() { if (TrialTablet != null) TrialTablet.SetActive(true); }
-        public void HideTrialTablet() { if (TrialTablet != null) TrialTablet.SetActive(false); }
+        public void ShowTrialTablet()
+        {
+            if (TrialTablet != null && !TrialTablet.activeSelf) TrialTablet.SetActive(true);
+        }
+
+        public void HideTrialTablet()
+        {
+            if (TrialTablet != null && TrialTablet.activeSelf) TrialTablet.SetActive(false);
+        }
 
         public static bool SpawnMonster(float statMult)
         {
@@ -3977,21 +4020,9 @@ namespace SephiriaTrial
             if (TrialController.Instance != null)
                 TrialController.Instance.StartCoroutine(MonitorMonsterDeath(monster, av));
 
-            Type avType = av.GetType();
-            FieldInfo? fNetworkMaxHp = avType.GetField("NetworkmaxHp", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            FieldInfo? fMaxHp = avType.GetField("maxHp", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            FieldInfo? fNetworkHp = avType.GetField("Networkhp", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            FieldInfo? fHp = avType.GetField("hp", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (av.hp <= 0f || av.IsDead) yield break;
 
-            float currentHp = fHp != null ? (float)fHp.GetValue(av) : 1f;
-            FieldInfo? fIsDead = avType.GetField("isDead", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            bool isDead = fIsDead != null && (bool)fIsDead.GetValue(av);
-
-            if (currentHp <= 0f || isDead) { yield break; }
-
-            float baseHp = 0f;
-            if (fNetworkMaxHp != null) baseHp = (float)fNetworkMaxHp.GetValue(av);
-            if (baseHp <= 0f && fMaxHp != null) baseHp = (float)fMaxHp.GetValue(av);
+            float baseHp = av.NetworkmaxHp;
 
             float finalHp = baseHp + (baseHp * mult / 10f);
             if (isMiniBoss)
@@ -4001,10 +4032,10 @@ namespace SephiriaTrial
                 finalHp *= 1.25f;
             }
 
-            fNetworkMaxHp?.SetValue(av, finalHp);
-            fMaxHp?.SetValue(av, finalHp);
-            fNetworkHp?.SetValue(av, finalHp);
-            fHp?.SetValue(av, finalHp);
+            // These native UnitAvatar setters mark Mirror's SyncVars dirty.
+            // Writing the backing fields leaves clients on the prefab HP.
+            av.NetworkmaxHp = finalHp;
+            av.Networkhp = finalHp;
 
             // Regular enemies keep the existing spawn chance. Mini bosses only
             // receive this trial-granted super armor from phase 25 onward.
@@ -4276,25 +4307,10 @@ namespace SephiriaTrial
 
                     if (av != null)
                     {
-                        if (!isHpFieldsCached)
-                        {
-                            Type avType = av.GetType();
-                            var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
-                            cachedFNetworkMaxHp = avType.GetField("NetworkmaxHp", flags);
-                            cachedFMaxHp = avType.GetField("maxHp", flags);
-                            cachedFNetworkHp = avType.GetField("Networkhp", flags);
-                            cachedFHp = avType.GetField("hp", flags);
-                            isHpFieldsCached = true;
-                        }
-
                         float infinityHp = 99999999f;
-
-                        cachedFNetworkMaxHp?.SetValue(av, infinityHp);
-                        cachedFMaxHp?.SetValue(av, infinityHp);
-                        cachedFNetworkHp?.SetValue(av, infinityHp);
-                        cachedFHp?.SetValue(av, infinityHp);
-
-                        Debug.Log("[EndlessMod] 허수아비 체력을 리플렉션을 통해 1억으로 설정했습니다.");
+                        av.NetworkmaxHp = infinityHp;
+                        av.Networkhp = infinityHp;
+                        Debug.Log("[EndlessMod] 허수아비 체력을 1억으로 설정했습니다.");
                     }
 
                     NetworkServer.Spawn(dummy);
@@ -4752,7 +4768,7 @@ namespace SephiriaTrial
                         if (TrialController.Instance != null)
                         {
                             if (NetworkServer.active) TrialController.Instance.ResetTrial(true);
-                            else TrialController.Instance.CmdNotifyGameOver();
+                            else TrialNetworkBridge.SendAction(TrialNetworkBridge.NotifyGameOver);
                         }
                     }
                     break;
@@ -4811,35 +4827,90 @@ namespace SephiriaTrial
 
         public static void SetAllPlayersBattleState(bool isInBattle)
         {
-            if (!NetworkServer.active) return;
-            sbyte stateValue = (sbyte)(isInBattle ? 1 : 0);
-
-            foreach (PlayerSpawner playerSpawner in PlayerSpawner.MultiplayerList)
+            if (!NetworkServer.active)
             {
-                if (playerSpawner == null || playerSpawner.PlayerAvatar == null) continue;
+                TrialBattleParticipants.Clear();
+                TrialBattleEligiblePlayers.Clear();
+                TrialBattleParticipantsToRelease.Clear();
+                return;
+            }
 
-                var player = playerSpawner.PlayerAvatar;
-                if (player == null) continue;
+            if (isInBattle)
+                ReconcileTrialPlayerBattleState();
+            else
+                ReleaseTrialPlayerBattleState();
+        }
 
-                if (!isBattleFieldsCached)
-                {
-                    Type playerType = player.GetType();
-                    var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+        private static void ReconcileTrialPlayerBattleState()
+        {
+            TrialController? controller = TrialController.Instance;
+            if (controller == null || !controller.IsTrialRunning)
+            {
+                ReleaseTrialPlayerBattleState();
+                return;
+            }
 
-                    cachedFNetworkIsInBattle = playerType.GetField("NetworkisInBattle", flags);
-                    cachedFIsInBattle = playerType.GetField("isInBattle", flags);
-                    isBattleFieldsCached = true;
-                }
+            string battleGuid = GetBattleFloorGuidForPhase(controller.CurrentPhase);
+            TrialBattleEligiblePlayers.Clear();
+            foreach (NetworkConnectionToClient connection in NetworkServer.connections.Values)
+            {
+                PlayerAvatar? player = connection?.identity != null
+                    ? connection.identity.GetComponent<PlayerAvatar>() : null;
+                if (player != null && player.isServer && !player.IsDead &&
+                    player.currentFloorGuid == battleGuid)
+                    TrialBattleEligiblePlayers.Add(player);
+            }
 
+            TrialBattleParticipantsToRelease.Clear();
+            foreach (PlayerAvatar participant in TrialBattleParticipants)
+                if (participant == null || !TrialBattleEligiblePlayers.Contains(participant))
+                    TrialBattleParticipantsToRelease.Add(participant);
+            foreach (PlayerAvatar participant in TrialBattleParticipantsToRelease)
+                ReleaseTrialPlayerBattleState(participant);
+            TrialBattleParticipantsToRelease.Clear();
+
+            foreach (PlayerAvatar player in TrialBattleEligiblePlayers)
+            {
+                if (TrialBattleParticipants.Contains(player)) continue;
                 try
                 {
-                    cachedFNetworkIsInBattle?.SetValue(player, stateValue);
-                    cachedFIsInBattle?.SetValue(player, stateValue);
+                    player.StartBattle();
+                    TrialBattleParticipants.Add(player);
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogError($"[EndlessMod] 플레이어 전투 상태 리플렉션 주입 실패: {ex.Message}");
+                    Debug.LogError($"[EndlessMod] 시련 전투 상태 시작 실패: {ex.Message}");
                 }
+            }
+            TrialBattleEligiblePlayers.Clear();
+        }
+
+        private static void ReleaseTrialPlayerBattleState()
+        {
+            TrialBattleParticipantsToRelease.Clear();
+            TrialBattleParticipantsToRelease.AddRange(TrialBattleParticipants);
+            foreach (PlayerAvatar participant in TrialBattleParticipantsToRelease)
+                ReleaseTrialPlayerBattleState(participant);
+            TrialBattleParticipantsToRelease.Clear();
+            TrialBattleEligiblePlayers.Clear();
+        }
+
+        private static void ReleaseTrialPlayerBattleState(PlayerAvatar participant)
+        {
+            if (participant == null || !NetworkServer.active)
+            {
+                TrialBattleParticipants.Remove(participant);
+                return;
+            }
+            try
+            {
+                if (participant.isInBattle > 0)
+                    participant.StopBattle();
+                TrialBattleParticipants.Remove(participant);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[EndlessMod] 시련 전투 상태 해제 실패: {ex.Message}");
             }
         }
     }

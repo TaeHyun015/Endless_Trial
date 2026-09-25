@@ -13,8 +13,8 @@ using UnityEngine.Networking;
 
 namespace SephiriaTrial
 {
-    // One updater per game process. AddOnLoader can load the DLL again on a title
-    // transition; that must not start another request or show another prompt.
+    // Keep one updater object per process, but check the release again whenever
+    // AddOnLoader loads the mod after returning from the title screen.
     internal sealed class TrialAutoUpdater : MonoBehaviour
     {
         private const string ReleaseApi = "https://api.github.com/repos/TaeHyun015/Sephiria_Endless_Trial/releases/latest";
@@ -57,13 +57,22 @@ namespace SephiriaTrial
 
         internal static void EnsureStarted(string version)
         {
-            if (Application.platform != RuntimePlatform.WindowsPlayer || instance != null) return;
+            if (Application.platform != RuntimePlatform.WindowsPlayer) return;
             try
             {
-                GameObject gameObject = new GameObject("EndlessTrial_AutoUpdater");
-                DontDestroyOnLoad(gameObject);
-                TrialAutoUpdater updater = gameObject.AddComponent<TrialAutoUpdater>();
-                instance = updater;
+                TrialAutoUpdater? updater = instance;
+                if (updater == null)
+                {
+                    GameObject gameObject = new GameObject("EndlessTrial_AutoUpdater");
+                    DontDestroyOnLoad(gameObject);
+                    updater = gameObject.AddComponent<TrialAutoUpdater>();
+                    instance = updater;
+                }
+                if (updater.installing) return;
+                updater.StopAllCoroutines();
+                updater.pendingAsset = null;
+                updater.pendingVersion = string.Empty;
+                updater.prompted = false;
                 updater.installedVersion = version;
                 updater.StartCoroutine(updater.CheckRelease());
                 UnityEngine.Debug.Log("[Endless Trial Update] Release check scheduled: installed=" + version);
@@ -72,6 +81,16 @@ namespace SephiriaTrial
             {
                 UnityEngine.Debug.LogWarning("[Endless Trial Update] Could not start release check: " + exception.Message);
             }
+        }
+
+        internal static void SuspendUntilNextLoad()
+        {
+            TrialAutoUpdater? updater = instance;
+            if (updater == null || updater.installing) return;
+            updater.StopAllCoroutines();
+            updater.pendingAsset = null;
+            updater.pendingVersion = string.Empty;
+            updater.prompted = false;
         }
 
         private void OnDestroy()

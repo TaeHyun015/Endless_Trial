@@ -17,22 +17,84 @@ namespace SephiriaTrial
         private static FieldInfo? cachedFInteractionDescription;
         private static bool isInteractFieldsCached = false;
 
-        [SyncVar(hook = nameof(OnDisplayPhaseChanged))]
         public int DisplayPhase = 0;
-
-        void OnDisplayPhaseChanged(int oldVal, int newVal)
-        {
-            UpdateLocalUI(newVal);
-        }
-
-        [SyncVar] public int CurrentPhase = 1;
-        [SyncVar] private int aliveMonsterCount;
-        [SyncVar] private bool isTrialRunning;
+        public int CurrentPhase = 1;
+        private int aliveMonsterCount;
+        private bool isTrialRunning;
+        private bool localBattleUiClosedForCurrentLife;
         private readonly HashSet<int> deadMonsterIds = new HashSet<int>();
         // RandomEnemyPhaseSpawner.MultiplayerLimit in the original game.
         private static readonly int[] ConcurrentMonsterLimits = { 53, 53, 63, 73, 73, 83, 93, 103, 113 };
         public bool IsTrialRunning => isTrialRunning;
         public int AliveMonsterCount => aliveMonsterCount;
+
+        // The mod DLL is built outside Unity's Mirror Weaver. Serialize the
+        // controller state explicitly; [SyncVar] and [ClientRpc] attributes on
+        // this type do not generate network code in the shipped DLL.
+        public override void OnSerialize(NetworkWriter writer, bool initialState)
+        {
+            writer.WriteInt(DisplayPhase);
+            writer.WriteInt(CurrentPhase);
+            writer.WriteBool(isTrialRunning);
+        }
+
+        public override void OnDeserialize(NetworkReader reader, bool initialState)
+        {
+            int displayPhase = reader.ReadInt();
+            int currentPhase = reader.ReadInt();
+            bool running = reader.ReadBool();
+            bool displayChanged = initialState || DisplayPhase != displayPhase;
+            bool runningChanged = initialState || isTrialRunning != running;
+            DisplayPhase = displayPhase;
+            CurrentPhase = currentPhase;
+            isTrialRunning = running;
+            if (displayChanged && EndlessMod.IsLocalPlayerInTrialFloor())
+                UpdateLocalUI(displayPhase);
+            if (runningChanged) RefreshLocalTrialState();
+        }
+
+        [Server]
+        private void SetTrialRunning(bool running)
+        {
+            if (isTrialRunning == running) return;
+            isTrialRunning = running;
+            SetDirty();
+            RefreshLocalTrialState();
+        }
+
+        internal void RefreshLocalTrialState()
+        {
+            if (!EndlessMod.IsLocalPlayerInTrialFloor())
+            {
+                localBattleUiClosedForCurrentLife = false;
+                return;
+            }
+            if (isTrialRunning) EndlessMod.Instance?.HideTrialTablet();
+            else EndlessMod.Instance?.ShowTrialTablet();
+
+            PlayerAvatar? local = NetworkClient.localPlayer?.GetComponent<PlayerAvatar>();
+            if (!isTrialRunning || local == null || local.IsDead ||
+                !EndlessMod.IsTrialBattleFloorGuid(local.currentFloorGuid))
+            {
+                localBattleUiClosedForCurrentLife = false;
+                return;
+            }
+
+            UIManager? ui = UIManager.Instance;
+            PlayerSpawner? spawner = local.GetComponent<PlayerSpawner>();
+            if (ui == null || spawner == null) return;
+            bool inventoryOrRewardOpen =
+                ui.GetElement<UI_CharacterStatusPanel>()?.IsOpened == true ||
+                ui.GetElement<UI_SephiriteRewardPanel>()?.IsOpened == true;
+            if (!localBattleUiClosedForCurrentLife || inventoryOrRewardOpen)
+            {
+                // The native travel flow uses this method to close the local
+                // control stack. Apply it when trial combat begins, including
+                // after a player is revived during an active phase.
+                spawner.CloseSomeUI();
+                localBattleUiClosedForCurrentLife = true;
+            }
+        }
 
         public override void OnStartServer() { Instance = this; }
         void Awake()
@@ -49,12 +111,16 @@ namespace SephiriaTrial
             // During MultiZone the controller is already replicated, but the
             // stage banner belongs only in the Trial floor.
             if (EndlessMod.IsLocalPlayerInTrialFloor())
+            {
                 UpdateLocalUI(DisplayPhase);
+                RefreshLocalTrialState();
+            }
         }
 
         internal void UpdateLocalUIFromFloorTransition()
         {
             UpdateLocalUI(DisplayPhase);
+            RefreshLocalTrialState();
         }
 
         private void OnDestroy()
@@ -116,13 +182,11 @@ namespace SephiriaTrial
         [Server]
         public void SetDisplayPhase(int phase)
         {
-            DisplayPhase = phase;
-            RpcUpdateUIText(phase);
-        }
-
-        [ClientRpc]
-        public void RpcUpdateUIText(int phase)
-        {
+            if (DisplayPhase != phase)
+            {
+                DisplayPhase = phase;
+                SetDirty();
+            }
             UpdateLocalUI(phase);
         }
 
@@ -145,7 +209,8 @@ namespace SephiriaTrial
 
                 CurrentPhase = 1;
                 DisplayPhase = 0;
-                isTrialRunning = false;
+                SetDirty();
+                SetTrialRunning(false);
                 EndlessMod.Instance?.ShowTrialTablet();
                 RpcOnGameOver();
             }
@@ -158,7 +223,9 @@ namespace SephiriaTrial
             EndlessMod.ClearTrialSaveReturnPortal();
         }
 
-        [Command(requiresAuthority = false)]
+        // These entry points are invoked on the server, directly for the host
+        // or by TrialNetworkBridge for remote clients. This DLL has no Weaver.
+        [Server]
         public void CmdStartTrial(NetworkConnectionToClient? sender = null)
         {
             StartTrialOnServer(sender);
@@ -200,12 +267,12 @@ namespace SephiriaTrial
             EndlessMod.ClearTrialSaveReturnPortal();
             EndlessMod.ClearTrialTransferPortals();
             StopAllCoroutines();
-            isTrialRunning = true;
+            SetTrialRunning(true);
             StartCoroutine(TrialRoutine());
             return true;
         }
 
-        [Command(requiresAuthority = false)]
+        [Server]
         public void CmdEnterTrialSpace(int slot, NetworkConnectionToClient? sender = null)
         {
             EnterTrialSpaceOnServer(slot, sender);
@@ -264,7 +331,7 @@ namespace SephiriaTrial
                 TargetShowSystemMessage(sender, "trial.msg.entrance_unavailable");
         }
 
-        [Command(requiresAuthority = false)]
+        [Server]
         public void CmdDeleteTrialSlot(int slot, NetworkConnectionToClient? sender = null)
         {
             DeleteTrialSlotOnServer(slot, sender);
@@ -294,7 +361,7 @@ namespace SephiriaTrial
             return false;
         }
 
-        [Command(requiresAuthority = false)]
+        [Server]
         public void CmdMoveLocalPlayerToRewardFloor(NetworkConnectionToClient? sender = null)
         {
             if (!NetworkServer.active || sender == null || sender.identity == null)
@@ -312,33 +379,36 @@ namespace SephiriaTrial
             EndlessMod.MovePlayerToRewardFloor(avatar);
         }
 
-        [Command(requiresAuthority = false)]
+        [Server]
         public void CmdRecordTrialIndividualRewardClaim(int phase, string propId,
             NetworkConnectionToClient? sender = null)
         {
             EndlessMod.RecordTrialIndividualRewardClaimFromConnection(phase, propId, sender);
         }
 
-        [Command(requiresAuthority = false)]
+        [Server]
         public void CmdRecordTrialMysticPotUses(int phase, int usedCount,
             NetworkConnectionToClient? sender = null)
         {
             EndlessMod.RecordTrialMysticPotUsesFromConnection(phase, usedCount, sender);
         }
 
-        [ClientRpc]
         public void RpcSyncTrialIndividualRewardClaims(int phase, string json)
         {
+            if (!NetworkServer.active) return;
             EndlessMod.ReceiveTrialIndividualRewardClaims(phase, json);
+            TrialNetworkBridge.BroadcastNotice(
+                TrialNetworkBridge.RewardClaims, phase, text: json);
         }
 
-        [ClientRpc]
         public void RpcClearTrialIndividualRewardClaims()
         {
+            if (!NetworkServer.active) return;
             EndlessMod.ClearTrialLocalRewardClaims();
+            TrialNetworkBridge.BroadcastNotice(TrialNetworkBridge.ClearRewardClaims);
         }
 
-        [Command(requiresAuthority = false)]
+        [Server]
         public void CmdMoveLocalPlayerToBattleFloor(NetworkConnectionToClient? sender = null)
         {
             if (!NetworkServer.active || sender == null || sender.identity == null)
@@ -360,7 +430,6 @@ namespace SephiriaTrial
         {
             SetDisplayPhase(CurrentPhase);
             EndlessMod.CleanupTrialRewards();
-            RpcHideTrialTablet();
             EndlessMod.SetAllPlayersBattleState(true);
 
             RpcShowSystemMessage("trial.msg.start", CurrentPhase);
@@ -408,9 +477,9 @@ namespace SephiriaTrial
             EndlessMod.SetAllPlayersBattleState(false);
             NotifyTrialBattleEnded(CurrentPhase);
             CurrentPhase++;
-            RpcShowTrialTablet();
+            SetDirty();
+            SetTrialRunning(false);
             EndlessMod.SpawnTrialDummies();
-            isTrialRunning = false;
             EndlessMod.SaveTrialAutoCheckpoint(CurrentPhase, DisplayPhase);
         }
 
@@ -438,7 +507,7 @@ namespace SephiriaTrial
             EndlessMod.SpawnTrialSupplyTerminal(position + new Vector3(3f, 0f, 0f), phase);
         }
 
-        [Command(requiresAuthority = false)]
+        [Server]
         public void CmdSaveAndReturnToLobby(NetworkConnectionToClient? sender = null)
         {
             SaveAndReturnToLobbyOnServer(sender);
@@ -491,7 +560,8 @@ namespace SephiriaTrial
             deadMonsterIds.Clear();
             CurrentPhase = 1;
             DisplayPhase = 0;
-            isTrialRunning = false;
+            SetDirty();
+            SetTrialRunning(false);
             EndlessMod.SetAllPlayersBattleState(false);
             EndlessMod.CleanupTrialUI();
             EndlessMod.CleanupTrialRewards();
@@ -508,17 +578,20 @@ namespace SephiriaTrial
             SetDisplayPhase(Mathf.Max(1, displayPhase));
             aliveMonsterCount = 0;
             deadMonsterIds.Clear();
-            isTrialRunning = false;
+            SetDirty();
+            SetTrialRunning(false);
         }
 
         [Server]
         public void RestoreTrialPlaytime(float seconds)
         {
-            RpcRestoreTrialPlaytime(Mathf.Max(0f, seconds));
+            seconds = Mathf.Max(0f, seconds);
+            ApplyTrialPlaytime(seconds);
+            TrialNetworkBridge.BroadcastNotice(
+                TrialNetworkBridge.RestorePlaytime, seconds: seconds);
         }
 
-        [ClientRpc]
-        private void RpcRestoreTrialPlaytime(float seconds)
+        private static void ApplyTrialPlaytime(float seconds)
         {
             DungeonManager? dungeon = DungeonManager.Instance;
             if (dungeon == null) return;
@@ -529,11 +602,11 @@ namespace SephiriaTrial
         [Server]
         public void StopTrialRunTimer()
         {
-            RpcStopTrialRunTimer();
+            ApplyStopTrialRunTimer();
+            TrialNetworkBridge.BroadcastNotice(TrialNetworkBridge.StopPlaytime);
         }
 
-        [ClientRpc]
-        private void RpcStopTrialRunTimer()
+        private static void ApplyStopTrialRunTimer()
         {
             DungeonManager? dungeon = DungeonManager.Instance;
             if (dungeon == null) return;
@@ -541,20 +614,17 @@ namespace SephiriaTrial
             dungeon.playedRealtimeClientside = 0f;
         }
 
-        [ClientRpc] private void RpcHideTrialTablet() => EndlessMod.Instance?.HideTrialTablet();
-        [ClientRpc] private void RpcShowTrialTablet() => EndlessMod.Instance?.ShowTrialTablet();
-
-        [ClientRpc]
         private void RpcShowSystemMessage(string key, int phase)
         {
             if (UIManager.Instance != null) EndlessMod.ShowLocalizedSystemMessage(key, phase);
-            Debug.Log($"[Client] 시스템 메시지 수신: {key}, phase={phase}");
+            TrialNetworkBridge.BroadcastNotice(
+                TrialNetworkBridge.SystemMessage, phase, text: key);
         }
 
-        [TargetRpc]
         private void TargetShowSystemMessage(NetworkConnectionToClient target, string key)
         {
-            EndlessMod.ShowLocalizedSystemMessage(key);
+            TrialNetworkBridge.SendNoticeTo(
+                target, TrialNetworkBridge.SystemMessage, text: key);
         }
 
         [Server]
@@ -585,25 +655,17 @@ namespace SephiriaTrial
             }
         }
 
-        [Command(requiresAuthority = false)]
+        [Server]
         public void CmdNotifyGameOver()
         {
             if (!NetworkServer.active) return;
 
             ResetTrial(true);
-            RpcOnGameOver();
         }
 
-        [ClientRpc]
         private void RpcOnGameOver()
         {
-            if (!NetworkServer.active)
-            {
-                Debug.Log("[시련] 클라이언트 RPC: UI 정리 신호 수신");
-                EndlessMod.CleanupTrialUI();
-                EndlessMod.SetAllPlayersBattleState(false);
-                EndlessMod.Instance?.ShowTrialTablet();
-            }
+            TrialNetworkBridge.BroadcastNotice(TrialNetworkBridge.GameOver);
         }
 
         [Server] public void AddAliveCount() { aliveMonsterCount++; }

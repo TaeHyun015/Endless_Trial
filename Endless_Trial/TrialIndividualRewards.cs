@@ -470,7 +470,8 @@ namespace SephiriaTrial
                 RecordTrialMysticPotUsesFromConnection(phase, usedCount, connection);
             }
             else
-                TrialController.Instance?.CmdRecordTrialMysticPotUses(phase, usedCount);
+                TrialNetworkBridge.SendAction(
+                    TrialNetworkBridge.RecordMysticPotUses, phase, usedCount);
         }
 
         private static void ApplyOrReportTrialLocalRewardClaim(int phase, string propId, Component? component,
@@ -502,7 +503,8 @@ namespace SephiriaTrial
             if (NetworkServer.active)
                 RecordTrialIndividualRewardClaimOnServer(phase, propId, guid);
             else
-                TrialController.Instance?.CmdRecordTrialIndividualRewardClaim(phase, propId);
+                TrialNetworkBridge.SendAction(
+                    TrialNetworkBridge.ClaimReward, phase, text: propId);
         }
     }
 }
