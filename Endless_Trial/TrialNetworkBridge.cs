@@ -13,6 +13,7 @@ namespace SephiriaTrial
         internal const byte ClaimReward = 3;
         internal const byte RecordMysticPotUses = 4;
         internal const byte NotifyGameOver = 5;
+        internal const byte ReportBuild = 6;
 
         internal const byte SystemMessage = 1;
         internal const byte RewardClaims = 2;
@@ -20,6 +21,8 @@ namespace SephiriaTrial
         internal const byte RestorePlaytime = 4;
         internal const byte StopPlaytime = 5;
         internal const byte GameOver = 6;
+        internal const byte PartyDisconnected = 7;
+        internal const byte VersionMismatch = 8;
 
         private struct ClientAction : NetworkMessage
         {
@@ -148,6 +151,11 @@ namespace SephiriaTrial
 
         private static void OnServerAction(NetworkConnectionToClient sender, ClientAction action)
         {
+            if (action.operation == ReportBuild)
+            {
+                EndlessMod.RecordTrialClientBuild(sender, action.text ?? string.Empty);
+                return;
+            }
             if (sender?.identity == null || TrialController.Instance == null) return;
             switch (action.operation)
             {
@@ -217,6 +225,12 @@ namespace SephiriaTrial
                 case GameOver:
                     EndlessMod.CleanupTrialUI();
                     TrialController.Instance?.RefreshLocalTrialState();
+                    break;
+                case PartyDisconnected:
+                    EndlessMod.ShowTrialPartyDisconnectPopup(notice.text ?? string.Empty);
+                    break;
+                case VersionMismatch:
+                    EndlessMod.ShowTrialVersionMismatchPopup(notice.text ?? string.Empty);
                     break;
                 default:
                     Debug.LogWarning($"[시련] 알 수 없는 서버 알림: {notice.operation}");

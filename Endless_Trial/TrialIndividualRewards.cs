@@ -14,6 +14,7 @@ namespace SephiriaTrial
     {
         internal int phase;
         internal string propId = string.Empty;
+        internal string sourceId = string.Empty;
         internal int randomId;
         internal AltarOfTablet? cachedTablet;
     }
@@ -21,14 +22,14 @@ namespace SephiriaTrial
     internal sealed class TrialSephiriteClaimObserver : MonoBehaviour
     {
         internal int phase;
-        internal string propId = string.Empty;
+        internal string sourceId = string.Empty;
         internal string playerGuid = string.Empty;
 
         private void OnDestroy()
         {
             Sephirite? reward = GetComponent<Sephirite>();
             if (NetworkServer.active && reward != null && reward.isAcquired)
-                EndlessMod.RecordTrialIndividualRewardClaimOnServer(phase, propId, playerGuid);
+                EndlessMod.RecordTrialIndividualRewardClaimOnServer(phase, sourceId, playerGuid);
         }
     }
 
@@ -37,6 +38,7 @@ namespace SephiriaTrial
         private sealed class TrialIndividualRewardSourceState
         {
             public string propId = string.Empty;
+            public string sourceId = string.Empty;
             public float x;
             public float y;
             public float z;
@@ -62,6 +64,7 @@ namespace SephiriaTrial
         private static readonly FieldInfo? TrialTabletUsedField = typeof(AltarOfTablet).GetField("usedKeys", BindingFlags.Instance | BindingFlags.NonPublic);
         private static readonly FieldInfo? TrialSephiriteServedField = typeof(SephiriteSpawner).GetField("servedPlayerRandomIDs", BindingFlags.Instance | BindingFlags.NonPublic);
         private static readonly FieldInfo? TrialMysticPotUsedField = typeof(MysticPot).GetField("usedCount", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly FieldInfo? TrialPaidTabletMixUsedField = typeof(TabletMix).GetField("usedGuids", BindingFlags.Instance | BindingFlags.NonPublic);
         private static readonly Dictionary<int, TrialIndividualRewardRoomState> TrialLocalRewardRooms = new Dictionary<int, TrialIndividualRewardRoomState>();
         private static readonly HashSet<string> TrialLocalReportedClaims = new HashSet<string>();
         private static readonly Dictionary<int, float> TrialLocalMysticPotRetryAt = new Dictionary<int, float>();
@@ -74,18 +77,24 @@ namespace SephiriaTrial
 
         private static bool IsTrialIndividualRewardSource(string propId) =>
             propId == "InventoryShop" || propId == "InventoryOrb" || propId == "Anvil" ||
+            propId == "TabletMixWithCost" ||
             propId == "MaxHPDispenser" || propId == "Obelisk" ||
             propId == "MysticPot" || propId == "MiracleSelector" ||
             propId.StartsWith("AltarOfEnchant", StringComparison.Ordinal) ||
             propId.StartsWith("SephiriteSpawner", StringComparison.Ordinal);
 
-        private static void RegisterTrialIndividualRewardSource(GameObject obj, int phase, string propId, int randomId)
+        private static string GetRewardSourceId(TrialIndividualRewardSourceState source) =>
+            string.IsNullOrEmpty(source.sourceId) ? source.propId : source.sourceId;
+
+        private static void RegisterTrialIndividualRewardSource(GameObject obj, int phase, string propId,
+            int randomId, string? sourceId = null)
         {
             if (obj == null || !IsTrialIndividualRewardSource(propId)) return;
             TrialIndividualRewardSource marker = obj.GetComponent<TrialIndividualRewardSource>() ??
                 obj.AddComponent<TrialIndividualRewardSource>();
             marker.phase = phase;
             marker.propId = propId;
+            marker.sourceId = sourceId ?? propId;
             marker.randomId = randomId;
         }
 
@@ -131,12 +140,19 @@ namespace SephiriaTrial
             foreach (GameObject obj in objects)
             {
                 TrialIndividualRewardSource marker = obj.GetComponent<TrialIndividualRewardSource>();
-                TrialIndividualRewardSourceState? source = state.sources.FirstOrDefault(item => item.propId == marker.propId);
+                TrialIndividualRewardSourceState? source = state.sources.FirstOrDefault(
+                    item => GetRewardSourceId(item) == marker.sourceId);
                 if (source == null)
                 {
-                    source = new TrialIndividualRewardSourceState { propId = marker.propId };
+                    source = new TrialIndividualRewardSourceState
+                    {
+                        propId = marker.propId,
+                        sourceId = marker.sourceId
+                    };
                     state.sources.Add(source);
                 }
+                source.propId = marker.propId;
+                source.sourceId = marker.sourceId;
                 source.x = obj.transform.position.x;
                 source.y = obj.transform.position.y;
                 source.z = obj.transform.position.z;
@@ -154,6 +170,9 @@ namespace SephiriaTrial
                 AltarOfEnchant? altar = obj.GetComponent<AltarOfEnchant>();
                 if (altar != null && TrialAltarRemainingField?.GetValue(altar) is Dictionary<string, int> remaining)
                     source.remainingByGuid = new Dictionary<string, int>(remaining);
+                TabletMix? mixer = obj.GetComponent<TabletMix>();
+                if (mixer != null && TrialPaidTabletMixUsedField?.GetValue(mixer) is HashSet<string> mixerUsers)
+                    source.usedGuids = mixerUsers.ToList();
                 if (obj.GetComponent<SephiriteSpawner>() != null &&
                     TryFindTrialTabletForSource(obj, marker.randomId) is AltarOfTablet tablet &&
                     TrialTabletUsedField?.GetValue(tablet) is HashSet<string> tabletUsers)
@@ -187,6 +206,10 @@ namespace SephiriaTrial
             if (altar != null && TrialAltarRemainingField?.GetValue(altar) is Dictionary<string, int> remaining)
                 foreach (KeyValuePair<string, int> entry in state.remainingByGuid ?? new Dictionary<string, int>())
                     remaining[entry.Key] = entry.Value;
+
+            TabletMix? mixer = obj.GetComponent<TabletMix>();
+            if (mixer != null && TrialPaidTabletMixUsedField?.GetValue(mixer) is HashSet<string> mixerUsers)
+                foreach (string guid in state.usedGuids ?? new List<string>()) mixerUsers.Add(guid);
 
             SephiriteSpawner? spawner = obj.GetComponent<SephiriteSpawner>();
             if (spawner != null && TrialSephiriteServedField?.GetValue(spawner) is HashSet<int> served)
@@ -230,19 +253,23 @@ namespace SephiriaTrial
                 Vector3 position = new Vector3(source.x, source.y, source.z);
                 if (source.propId == "InventoryShop")
                     SpawnTrialSupplyTerminalRestored(position, phase, floor, source);
-                else if (source.propId == "Anvil")
+                else if (source.propId == "TabletMixWithCost")
+                    SpawnTrialPaidTabletMixer(position, phase, floor, source);
+                else if (source.propId == "Anvil" && ShouldSpawnTrialAnvil())
                     SpawnNativeTrialAnvil(position, floor, phase, source);
+                else if (source.propId == "Anvil")
+                    continue;
                 else
                     SpawnFromDatabase(source.propId, position, floor, phase, source);
             }
         }
 
-        private static void ObserveTrialSephiriteRewards(GameObject source, int phase, string propId)
+        private static void ObserveTrialSephiriteRewards(GameObject source, int phase, string sourceId)
         {
             SephiriteSpawner? spawner = source.GetComponent<SephiriteSpawner>();
             if (spawner == null) return;
             TrialIndividualRewardSourceState? savedSource = ReadTrialIndividualRewardRoomState(phase)?.sources?
-                .FirstOrDefault(item => item.propId == propId);
+                .FirstOrDefault(item => GetRewardSourceId(item) == sourceId);
             foreach (PlayerSpawner player in PlayerSpawner.MultiplayerList)
             {
                 if (player == null || player.PlayerAvatar == null || string.IsNullOrEmpty(player.playerGuid)) continue;
@@ -265,7 +292,7 @@ namespace SephiriaTrial
                     TrialSephiriteClaimObserver observer = identity.GetComponent<TrialSephiriteClaimObserver>() ??
                         identity.gameObject.AddComponent<TrialSephiriteClaimObserver>();
                     observer.phase = phase;
-                    observer.propId = propId;
+                    observer.sourceId = sourceId;
                     observer.playerGuid = player.playerGuid;
                 }
                 foreach (GameObject duplicate in duplicateRewards)
@@ -285,21 +312,22 @@ namespace SephiriaTrial
                 {
                     TrialIndividualRewardSourceState? savedSource =
                         ReadTrialIndividualRewardRoomState(marker.phase)?.sources?
-                            .FirstOrDefault(source => source.propId == marker.propId);
+                            .FirstOrDefault(source => GetRewardSourceId(source) == marker.sourceId);
                     if (savedSource != null)
                         RestoreTrialTabletClaimState(reward, savedSource);
-                    ObserveTrialSephiriteRewards(reward, marker.phase, marker.propId);
+                    ObserveTrialSephiriteRewards(reward, marker.phase, marker.sourceId);
                 }
             }
         }
 
-        internal static void RecordTrialIndividualRewardClaimOnServer(int phase, string propId, string playerGuid)
+        internal static void RecordTrialIndividualRewardClaimOnServer(int phase, string sourceId, string playerGuid)
         {
             if (!NetworkServer.active || string.IsNullOrWhiteSpace(playerGuid) ||
                 !ActiveTrialPartyGuids.Contains(playerGuid)) return;
             TrialIndividualRewardRoomState? state = ReadTrialIndividualRewardRoomState(phase);
-            TrialIndividualRewardSourceState? source = state?.sources?.FirstOrDefault(item => item.propId == propId);
-            if (state == null || source == null || !IsTrialIndividualRewardSource(propId)) return;
+            TrialIndividualRewardSourceState? source = state?.sources?.FirstOrDefault(
+                item => GetRewardSourceId(item) == sourceId);
+            if (state == null || source == null || !IsTrialIndividualRewardSource(source.propId)) return;
             if (source.claimedGuids.Contains(playerGuid)) return;
             source.claimedGuids.Add(playerGuid);
             WriteTrialIndividualRewardRoomState(state);
@@ -424,6 +452,10 @@ namespace SephiriaTrial
                             break;
                         }
             }
+            // InventoryShop.price is a plain field in the native prefab, not a
+            // SyncVar. Apply the host's deterministic phase price locally too.
+            if (_trialLocalRewardShop != null)
+                _trialLocalRewardShop.price = GetTrialSupplyTerminalPrice(phase);
             string guid = HorayNetworkAuthenticator.GetMyPlayerGuid();
             if (string.IsNullOrEmpty(guid)) return;
             ApplyOrReportTrialLocalRewardClaim(phase, "InventoryShop", _trialLocalRewardShop,

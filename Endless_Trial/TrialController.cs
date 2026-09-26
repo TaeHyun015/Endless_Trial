@@ -241,12 +241,18 @@ namespace SephiriaTrial
         {
             Debug.Log($"[시련] 단계 시작 처리: server={NetworkServer.active}, host={EndlessMod.IsTrialHost(sender)}, running={isTrialRunning}, phase={CurrentPhase}");
             if (!NetworkServer.active) return false;
+            if (EndlessMod.IsTrialDisconnectPaused) return false;
             if (!EndlessMod.IsTrialHost(sender))
             {
                 if (sender != null) TargetShowSystemMessage(sender, "trial.msg.host_only");
                 return false;
             }
             if (isTrialRunning)
+            {
+                TargetShowSystemMessage(sender, "trial.msg.start_unavailable");
+                return false;
+            }
+            if (!EndlessMod.IsTrialCheckpointReadyForNextPhase(CurrentPhase))
             {
                 TargetShowSystemMessage(sender, "trial.msg.start_unavailable");
                 return false;
@@ -266,6 +272,7 @@ namespace SephiriaTrial
             EndlessMod.ClearTrialDummies();
             EndlessMod.ClearTrialSaveReturnPortal();
             EndlessMod.ClearTrialTransferPortals();
+            EndlessMod.ClearDeadTrialMonsters();
             StopAllCoroutines();
             SetTrialRunning(true);
             StartCoroutine(TrialRoutine());
@@ -302,6 +309,7 @@ namespace SephiriaTrial
                 if (sender != null) TargetShowSystemMessage(sender, "trial.msg.host_only_enter");
                 return;
             }
+            if (!EndlessMod.RequireCompatibleTrialParty()) return;
             if (!EndlessMod.AreAllPlayersNearTrialEntrance())
             {
                 Debug.LogWarning("[시련] 슬롯 입장 중단: 참가자가 입구 포탈 범위 밖에 있습니다.");
@@ -364,6 +372,7 @@ namespace SephiriaTrial
         [Server]
         public void CmdMoveLocalPlayerToRewardFloor(NetworkConnectionToClient? sender = null)
         {
+            if (EndlessMod.IsTrialDisconnectPaused) return;
             if (!NetworkServer.active || sender == null || sender.identity == null)
             {
                 Debug.LogWarning("[시련] 보상 층 이동 명령을 처리할 연결 또는 플레이어가 없습니다.");
@@ -411,6 +420,7 @@ namespace SephiriaTrial
         [Server]
         public void CmdMoveLocalPlayerToBattleFloor(NetworkConnectionToClient? sender = null)
         {
+            if (EndlessMod.IsTrialDisconnectPaused) return;
             if (!NetworkServer.active || sender == null || sender.identity == null)
             {
                 Debug.LogWarning("[시련] 전투 층 이동 명령을 처리할 연결 또는 플레이어가 없습니다.");
@@ -433,6 +443,7 @@ namespace SephiriaTrial
             EndlessMod.SetAllPlayersBattleState(true);
 
             RpcShowSystemMessage("trial.msg.start", CurrentPhase);
+            yield return EndlessMod.ClearDroppedItemsOnBattleFloor(CurrentPhase);
 
             deadMonsterIds.Clear();
             aliveMonsterCount = 0;
@@ -575,7 +586,7 @@ namespace SephiriaTrial
         public void RestoreSavedProgress(int phase, int displayPhase)
         {
             CurrentPhase = Mathf.Max(1, phase);
-            SetDisplayPhase(Mathf.Max(1, displayPhase));
+            SetDisplayPhase(Mathf.Max(0, displayPhase));
             aliveMonsterCount = 0;
             deadMonsterIds.Clear();
             SetDirty();
@@ -604,6 +615,13 @@ namespace SephiriaTrial
         {
             ApplyStopTrialRunTimer();
             TrialNetworkBridge.BroadcastNotice(TrialNetworkBridge.StopPlaytime);
+        }
+
+        [Server]
+        public void PauseForPartyDisconnect()
+        {
+            if (!NetworkServer.active) return;
+            StopAllCoroutines();
         }
 
         private static void ApplyStopTrialRunTimer()
@@ -642,7 +660,10 @@ namespace SephiriaTrial
             // satisfy the wave condition. Only QTemple_MBTrio_F has no successor, so its
             // death is the relay's final, count-releasing event.
             EndlessMod.TrySpawnNextSixtiethPhaseBoss(av);
-            StartCoroutine(DestroyMonsterAfterDelay(av.gameObject, 2.0f));
+            // Stage transitions stop this controller's coroutines. Keep corpse
+            // removal on the persistent runner, like the native remover's
+            // independent delayed NetworkServer.Destroy path.
+            CoroutineManager.Instance.StartCoroutine(DestroyMonsterAfterDelay(av.gameObject, 0.1f));
         }
 
         private IEnumerator DestroyMonsterAfterDelay(GameObject monster, float delay)

@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
+using System.Globalization;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
@@ -74,6 +75,7 @@ namespace SephiriaTrial
                 updater.pendingVersion = string.Empty;
                 updater.prompted = false;
                 updater.installedVersion = version;
+                updater.StartCoroutine(updater.CleanupCompletedUpdate(version));
                 updater.StartCoroutine(updater.CheckRelease());
                 UnityEngine.Debug.Log("[Endless Trial Update] Release check scheduled: installed=" + version);
             }
@@ -96,6 +98,67 @@ namespace SephiriaTrial
         private void OnDestroy()
         {
             if (ReferenceEquals(instance, this)) instance = null;
+        }
+
+        private IEnumerator CleanupCompletedUpdate(string version)
+        {
+            // The helper may still be exiting when the restarted game loads.
+            yield return new WaitForSecondsRealtime(5f);
+            string gameRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            string updateRoot = Path.Combine(gameRoot, "__EndlessTrial_Update");
+            if (!Directory.Exists(updateRoot)) yield break;
+            bool unsafeUpdateRoot = true;
+            try { unsafeUpdateRoot = (File.GetAttributes(updateRoot) & FileAttributes.ReparsePoint) != 0; }
+            catch (Exception exception)
+            {
+                UnityEngine.Debug.LogWarning("[Endless Trial Update] Cannot inspect cleanup directory: " + exception.Message);
+            }
+            if (unsafeUpdateRoot) yield break;
+
+            try
+            {
+                foreach (string workDir in Directory.GetDirectories(updateRoot))
+                {
+                    string marker = Path.Combine(workDir, "completed.txt");
+                    if (!File.Exists(marker) ||
+                        (File.GetAttributes(workDir) & FileAttributes.ReparsePoint) != 0 ||
+                        (File.GetAttributes(marker) & FileAttributes.ReparsePoint) != 0)
+                        continue;
+
+                    string[] completed = File.ReadAllLines(marker);
+                    if (completed.Length != 2 || !string.Equals(completed[0], version, StringComparison.Ordinal))
+                        continue;
+                    string backupName = completed[1];
+                    const string backupPrefix = "__EndlessTrial_Backup_";
+                    if (!backupName.StartsWith(backupPrefix, StringComparison.Ordinal) ||
+                        !DateTime.TryParseExact(backupName.Substring(backupPrefix.Length),
+                            "yyyyMMdd_HHmmss", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
+                        continue;
+
+                    string backup = Path.GetFullPath(Path.Combine(gameRoot, backupName));
+                    if (!string.Equals(Path.GetDirectoryName(backup), gameRoot, StringComparison.OrdinalIgnoreCase) ||
+                        !string.Equals(Path.GetDirectoryName(Path.GetFullPath(workDir)), updateRoot,
+                            StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    if (Directory.Exists(backup))
+                    {
+                        if ((File.GetAttributes(backup) & FileAttributes.ReparsePoint) != 0) continue;
+                        Directory.Delete(backup, true);
+                    }
+                    Directory.Delete(workDir, true);
+                    UnityEngine.Debug.Log("[Endless Trial Update] Completed update files removed: " + version);
+                }
+                if (Directory.GetFileSystemEntries(updateRoot).Length == 0)
+                {
+                    Directory.Delete(updateRoot);
+                    string logPath = Path.Combine(gameRoot, "__EndlessTrial_Update.log");
+                    if (File.Exists(logPath)) File.Delete(logPath);
+                }
+            }
+            catch (Exception exception)
+            {
+                UnityEngine.Debug.LogWarning("[Endless Trial Update] Cleanup will retry on the next load: " + exception.Message);
+            }
         }
 
         private IEnumerator CheckRelease()
@@ -388,7 +451,7 @@ namespace SephiriaTrial
                     " -ArchivePath " + Quote(archivePath) + " -ModPath " + Quote(modPath) +
                     " -GameExecutable " + Quote(gameExe) + " -WorkDir " + Quote(workDir) +
                     " -ExpectedHash " + Quote(hash) + " -ExpectedVersion " + Quote(version),
-                WorkingDirectory = workDir,
+                WorkingDirectory = Path.GetDirectoryName(gameExe) ?? workDir,
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 WindowStyle = ProcessWindowStyle.Hidden
@@ -512,6 +575,8 @@ try {
         throw
     }
     Add-Content -LiteralPath $logPath -Value ('Installed Endless Trial ' + $ExpectedVersion + '; backup: ' + $backup)
+    [IO.File]::WriteAllLines((Join-Path $resolvedWork 'completed.txt'),
+        [string[]]@($ExpectedVersion, [IO.Path]::GetFileName($backup)))
     try { Start-Process -FilePath $GameExecutable -WorkingDirectory $gameRoot }
     catch {
         $failed = Join-Path $gameRoot ('__EndlessTrial_Failed_' + (Get-Date -Format 'yyyyMMdd_HHmmss'))
@@ -519,7 +584,6 @@ try {
         Move-Item -LiteralPath $backup -Destination $ModPath
         throw
     }
-    try { Remove-Item -LiteralPath $resolvedWork -Recurse -Force -ErrorAction Stop } catch { }
 }
 catch {
     Add-Content -LiteralPath $logPath -Value ('FAILED: ' + $_.Exception.Message)

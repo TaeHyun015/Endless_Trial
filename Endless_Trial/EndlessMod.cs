@@ -224,6 +224,8 @@ namespace SephiriaTrial
         private const string TrialSlotPrefix = "EndlessTrialSlot_";
         private const string TrialActiveSlotKey = "EndlessTrialActiveSlot";
         private const string TrialRewardIssuedPhaseKey = "EndlessTrialRewardIssuedPhase";
+        private static readonly List<int> TrialPotionRewardItemIds = new List<int>
+            { 28, 29, 30, 31, 32, 33, 34, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51 };
         private const string TrialMerchantRoomStateKey = "EndlessTrialMerchantRoomState";
         private const string TrialIndividualRewardRoomStateKey = "EndlessTrialIndividualRewardRoomState";
         private const string TrialWitchHatPendingKey = "EndlessTrialWitchHatPending";
@@ -235,10 +237,10 @@ namespace SephiriaTrial
         private static int[]? _nativeLevelExpTable;
         private static int[]? _trialLevelExpTable;
         private static bool _trialLevelCapActive;
-        private static bool _trialLevelCapUnavailable;
         private static bool _trialLevelCapSuppressed;
         private static float _trialLevelCapPendingFloorUntil;
         private static float _nextLevelCapRestoreAttemptTime;
+        private static float _nextLevelCapApplyAttemptTime;
         private static int _activeTrialSlot;
         private static readonly Dictionary<int, SaveData> TrialSlotFiles = new Dictionary<int, SaveData>();
         private static string _trialSlotProfile = string.Empty;
@@ -271,6 +273,12 @@ namespace SephiriaTrial
         private const float TrialMonsterHardRecoveryDistance = 2f;
         private const float TrialMonsterHardRecoveryDelay = 1f;
         private const float TrialMonsterSpawnSuperArmorChance = 0.30f;
+        // Every 30 phases raises the wave's difficulty without changing the
+        // first bracket's existing stats.
+        private const float TrialHealthIncreasePerBracket = 0.75f;
+        private const float TrialArmorChanceIncreasePerBracket = 0.12f;
+        private const float TrialArmorStrengthIncreasePerBracket = 0.5f;
+        private const int TrialDamageBonusIncreasePerBracket = 10;
         // The original dungeon's region-weighted random-room selection averages
         // roughly 0.8-0.9% for WitchHat. Roll once after each cleared phase and
         // reserve a single visit for the next reward room.
@@ -497,6 +505,7 @@ namespace SephiriaTrial
             EnsureRuntimeTrialControllerPrefab();
             RegisterCachedTrialNetworkPrefabs();
             TrialNetworkBridge.EnsureRegistered();
+            InitializeTrialMultiplayerSafety(metadata.modVersion);
             SceneManager.activeSceneChanged += OnActiveSceneChanged;
 
             GameObject? pf = Resources.Load<GameObject>("Sephirite/Sephirite_Tablet");
@@ -536,6 +545,11 @@ namespace SephiriaTrial
                     { "trial.msg.party_mismatch", new Dictionary<string, string> { { "ko-KR", "저장된 참가자 전원이 모여야 합니다. 새 참가자는 이 시련에 합류할 수 없습니다." }, { "en-US", "All saved players must be present. New players cannot join this Trial." }, { "ja-JP", "保存された参加者全員が必要です。新しい参加者は合流できません。" }, { "zh-CN", "已保存的参与者必须全部到齐。新玩家无法加入此试炼。" } } },
                     { "trial.msg.slot_unavailable", new Dictionary<string, string> { { "ko-KR", "시련 저장 슬롯을 사용할 수 없습니다." }, { "en-US", "This Trial save slot is unavailable." }, { "ja-JP", "この試練保存スロットは利用できません。" }, { "zh-CN", "此试炼存档栏位不可用。" } } },
                     { "trial.msg.slot_deleted", new Dictionary<string, string> { { "ko-KR", "시련 저장 슬롯을 삭제했습니다." }, { "en-US", "Trial save slot deleted." }, { "ja-JP", "試練保存スロットを削除しました。" }, { "zh-CN", "已删除试炼存档栏位。" } } },
+                    { "trial.msg.build_check_pending", new Dictionary<string, string> { { "ko-KR", "참가자의 시련 모드 설치 상태를 확인 중입니다. 잠시 후 다시 시도하세요." }, { "en-US", "Checking every player's Trial mod. Please try again shortly." }, { "ja-JP", "参加者の試練MODを確認中です。少し待ってから再試行してください。" }, { "zh-CN", "正在检查所有玩家的试炼模组，请稍后重试。" } } },
+                    { "trial.msg.mod_missing", new Dictionary<string, string> { { "ko-KR", "시련 모드가 설치되지 않았거나 응답하지 않는 참가자: {0}\n모든 참가자가 모드를 설치해야 입장할 수 있습니다." }, { "en-US", "Trial mod missing or not responding: {0}\nEvery player needs the mod to enter." }, { "ja-JP", "試練MODが未導入、または応答していない参加者: {0}\n全員がMODを導入する必要があります。" }, { "zh-CN", "未安装试炼模组或未响应的玩家：{0}\n所有玩家都需要安装模组才能进入。" } } },
+                    { "trial.msg.version_mismatch", new Dictionary<string, string> { { "ko-KR", "시련 모드 버전 또는 파일이 일치하지 않는 참가자: {0}\n모든 참가자가 동일한 버전으로 업데이트해야 입장할 수 있습니다." }, { "en-US", "Trial mod version or files differ for: {0}\nEveryone needs the same build to enter." }, { "ja-JP", "試練MODのバージョンまたはファイルが異なる参加者: {0}\n全員が同じバージョンに更新してください。" }, { "zh-CN", "试炼模组版本或文件不一致的玩家：{0}\n所有玩家须更新至相同版本。" } } },
+                    { "trial.disconnect.confirm", new Dictionary<string, string> { { "ko-KR", "{0} 님의 연결이 끊겼습니다. 시련을 중단했습니다.\n마지막으로 완료한 단계의 저장 기록은 유지됩니다. 확인을 누르면 타이틀로 돌아갑니다." }, { "en-US", "{0} disconnected. The Trial has stopped.\nThe last completed checkpoint is kept. Confirm to return to the title." }, { "ja-JP", "{0} さんの接続が切れ、試練を中断しました。\n最後に完了した段階の記録は保持されます。確認するとタイトルに戻ります。" }, { "zh-CN", "{0} 断开连接，试炼已暂停。\n已保留最后完成阶段的存档。确认后返回标题画面。" } } },
+                    { "trial.disconnect.save_warning", new Dictionary<string, string> { { "ko-KR", "{0} 님의 연결이 끊겨 시련을 중단했습니다.\n저장 기록을 확인할 수 없습니다. 호스트에게 마지막 정상 저장 기록을 확인해 주세요. 확인을 누르면 타이틀로 돌아갑니다." }, { "en-US", "{0} disconnected and the Trial stopped.\nThe checkpoint could not be verified. Ask the host to check the last valid save. Confirm to return to the title." }, { "ja-JP", "{0} さんの接続が切れ、試練を中断しました。\n保存記録を確認できません。ホストに最後の有効な記録を確認してください。確認するとタイトルに戻ります。" }, { "zh-CN", "{0} 断开连接，试炼已中止。\n无法验证存档，请让房主检查最后有效的存档。确认后返回标题画面。" } } },
                     { "trial.slot.title", new Dictionary<string, string> { { "ko-KR", "시련 저장 슬롯" }, { "en-US", "Trial Save Slots" }, { "ja-JP", "試練保存スロット" }, { "zh-CN", "试炼存档栏位" } } },
                     { "trial.slot.empty", new Dictionary<string, string> { { "ko-KR", "슬롯 {0}: 새 시련" }, { "en-US", "Slot {0}: New Trial" }, { "ja-JP", "スロット {0}: 新しい試練" }, { "zh-CN", "栏位 {0}：新试炼" } } },
                     { "trial.slot.corrupt", new Dictionary<string, string> { { "ko-KR", "슬롯 {0}: 불러올 수 없음" }, { "en-US", "Slot {0}: Cannot load" }, { "ja-JP", "スロット {0}: 読み込めません" }, { "zh-CN", "栏位 {0}：无法读取" } } },
@@ -579,6 +593,7 @@ namespace SephiriaTrial
         {
             if (!ReferenceEquals(Instance, this)) return;
             TrialAutoUpdater.SuspendUntilNextLoad();
+            ShutdownTrialMultiplayerSafety();
             SetAllPlayersBattleState(false);
             TrialNetworkBridge.Shutdown();
             if (_localizationReadyHandler != null)
@@ -599,6 +614,7 @@ namespace SephiriaTrial
                 _updateBridge = null;
             }
             _nextLevelCapRestoreAttemptTime = 0f;
+            _nextLevelCapApplyAttemptTime = 0f;
             RestoreNativeLevelCap();
             _trialLevelCapPendingFloorUntil = 0f;
             _trialLevelCapSuppressed = false;
@@ -622,6 +638,7 @@ namespace SephiriaTrial
             ActiveTrialTransferPortalFloors.Clear();
             PreparedRewardRoomPhases.Clear();
             PreparedRewardRoomFloorIds.Clear();
+            ClearTrialRewardFloorContentsTracking();
             TrialSlotFiles.Clear();
             ActiveTrialPartyGuids.Clear();
             ActiveTrialPartyNames.Clear();
@@ -629,6 +646,7 @@ namespace SephiriaTrial
             FilteredTrialMonsterPools.Clear();
             _activeTrialSlot = 0;
             _trialSlotProfile = string.Empty;
+            _nextSavedPartyWhitelistRefresh = 0f;
             _keepRestoredTrialLobbyOpen = false;
             _nextSavedLobbyRefreshTime = 0f;
             _trialFloorRegistered = false;
@@ -694,6 +712,7 @@ namespace SephiriaTrial
             if (now < _nextTrialFastTickTime) return;
             _nextTrialFastTickTime = now + 0.2f;
             TrialNetworkBridge.EnsureRegistered();
+            UpdateTrialMultiplayerSafety();
 
             if (_trialLevelCapActive && !NetworkClient.active && !NetworkServer.active)
                 RestoreNativeLevelCap();
@@ -722,6 +741,7 @@ namespace SephiriaTrial
             TrialController.Instance?.RefreshLocalTrialState();
             // Trial monsters are registered at the point of spawning.
             if (!NetworkServer.active) return;
+            AllowSavedTrialPartyToRejoinLobby();
             ReconcileTrialPlayerBattleState();
             KeepSavedTrialLobbyOpenForRejoin();
             RefreshTrialSephiriteRewardObservers();
@@ -754,6 +774,22 @@ namespace SephiriaTrial
         {
             ActiveTrialMonsters.Clear();
             TrialMonsterRuntimeCaches.Clear();
+        }
+
+        public static void ClearDeadTrialMonsters()
+        {
+            if (!NetworkServer.active) return;
+            for (int i = ActiveTrialMonsters.Count - 1; i >= 0; i--)
+            {
+                UnitAvatar monster = ActiveTrialMonsters[i];
+                if (monster == null || (!monster.IsDead && monster.hp > 0f)) continue;
+                ActiveTrialMonsters.RemoveAt(i);
+                if (monster != null)
+                {
+                    TrialMonsterRuntimeCaches.Remove(monster);
+                    NetworkServer.Destroy(monster.gameObject);
+                }
+            }
         }
 
         private static void RequestTrialEntranceSpawn()
@@ -1176,6 +1212,7 @@ namespace SephiriaTrial
                     overridePosition: TrialPlayerSpawnPosition);
             }
             Debug.Log($"[시련] 새 시련 층 이동 요청 완료: floor={targetFloorGuid}, phase={TrialController.Instance?.CurrentPhase ?? 1}");
+            CoroutineManager.Instance.StartCoroutine(SaveInitialTrialCheckpointAfterArrival());
             return true;
         }
 
@@ -1211,6 +1248,7 @@ namespace SephiriaTrial
 
             _keepRestoredTrialLobbyOpen = false;
             SyncTrialRejoinWhitelist();
+            MarkTrialPartyStarted();
             LockTrialLobbyLikeNativeRun();
         }
 
@@ -1220,6 +1258,22 @@ namespace SephiriaTrial
             manager.ClearRejoinWhitelist();
             foreach (string guid in ActiveTrialPartyGuids)
                 manager.AddToRejoinWhitelist(guid);
+        }
+
+        private static float _nextSavedPartyWhitelistRefresh;
+
+        private static void AllowSavedTrialPartyToRejoinLobby()
+        {
+            if (ActiveTrialPartyGuids.Count != 0 || SaveManager.Current == null ||
+                Time.unscaledTime < _nextSavedPartyWhitelistRefresh ||
+                !(NetworkManager.singleton is HorayNetworkManager manager)) return;
+            _nextSavedPartyWhitelistRefresh = Time.unscaledTime + 5f;
+            // The native authenticator only honors a reconnecting client's
+            // LastRejoinGuid when it is already in this list. Register saved
+            // slot rosters before clients authenticate in a fresh lobby.
+            for (int slot = 1; slot <= TrialSlotCount; slot++)
+                foreach (KeyValuePair<string, string> player in GetTrialSlotParty(slot))
+                    manager.AddToRejoinWhitelist(player.Key);
         }
 
         private static void KeepSavedTrialLobbyOpenForRejoin()
@@ -1407,8 +1461,9 @@ namespace SephiriaTrial
         // game; only Trial play receives additional thresholds.
         private static bool EnableTrialLevelCap()
         {
-            if (_trialLevelCapActive) return true;
-            if (_trialLevelCapUnavailable) return false;
+            if (_trialLevelCapActive && ReferenceEquals(LevelController.ExpTableByLevel, _trialLevelExpTable))
+                return true;
+            if (Time.unscaledTime < _nextLevelCapApplyAttemptTime) return false;
             try
             {
                 _levelExpTableField ??= typeof(LevelController).GetField(
@@ -1443,12 +1498,13 @@ namespace SephiriaTrial
                 if (!ReferenceEquals(LevelController.ExpTableByLevel, _trialLevelExpTable))
                     throw new InvalidOperationException("확장한 경험치 표가 적용되지 않았습니다.");
                 _trialLevelCapActive = true;
+                _nextLevelCapApplyAttemptTime = 0f;
                 Debug.Log($"[시련] 시련 전용 최대 레벨 적용: {_trialLevelExpTable.Length}");
                 return true;
             }
             catch (Exception exception)
             {
-                _trialLevelCapUnavailable = true;
+                _nextLevelCapApplyAttemptTime = Time.unscaledTime + 5f;
                 Debug.LogError("[시련] 시련 전용 경험치 표를 적용할 수 없습니다: " + exception);
                 return false;
             }
@@ -2044,6 +2100,9 @@ namespace SephiriaTrial
             SpawnTrialSaveReturnPortal(generator.guid);
             if (clearedRewardPhase)
                 SpawnBattleToRewardPortal(generator.guid);
+            if (controller.DisplayPhase > 0 && generator.guid == expectedGuid &&
+                !ActiveDummies.Any(dummy => dummy != null && generator.floorRelatedNetworkObjects.Contains(dummy)))
+                SpawnTrialDummies(generator);
             Debug.Log($"[시련] 전투 층 포탈 복구 완료: floor={generator.guid}, phase={controller.CurrentPhase}");
         }
 
@@ -2460,6 +2519,7 @@ namespace SephiriaTrial
             }
             CaptureTrialMerchantRoomState();
             CaptureTrialIndividualRewardRoomState();
+            CaptureTrialRewardFloorContents();
             Debug.Log($"[시련] 전투 층 이동 실행: {avatar.name}, {avatar.currentFloorGuid} -> {battleGuid}");
             DungeonManager.Instance.MoveFloor(avatar, battleGuid, "endless_trial_battle", 0,
                 recordHistory: true, allowSave: true, keepPrevFloor: true, randomPosition: false,
@@ -2469,19 +2529,62 @@ namespace SephiriaTrial
 
         public static bool AreAllPlayersInCurrentBattleFloor()
         {
+            if (!NetworkServer.active) return false;
             string expectedGuid = GetBattleFloorGuidForPhase(TrialController.Instance?.CurrentPhase ?? 1);
+            FloorGenerator? floor = FindLoadedFloor(expectedGuid);
+            if (floor == null || !floor.GenerateSuccess) return false;
+            Vector2 center = (Vector2)floor.transform.position + floor.Center;
+            Vector2 halfSize = floor.Size * 0.5f;
+            int playerCount = 0;
             foreach (NetworkConnectionToClient connection in NetworkServer.connections.Values)
             {
                 PlayerAvatar? avatar = connection?.identity != null ? connection.identity.GetComponent<PlayerAvatar>() : null;
                 if (avatar == null || avatar.currentFloorGuid != expectedGuid) return false;
+                Vector2 position = avatar.transform.position;
+                if (Mathf.Abs(position.x - center.x) > halfSize.x ||
+                    Mathf.Abs(position.y - center.y) > halfSize.y) return false;
+                playerCount++;
             }
-            return true;
+            return playerCount > 0 && playerCount == ActiveTrialPartyGuids.Count;
         }
 
         private static FloorGenerator? FindLoadedFloor(string guid)
         {
             return UnityEngine.Object.FindObjectsByType<FloorGenerator>(FindObjectsSortMode.None)
                 .FirstOrDefault(generator => generator != null && generator.guid == guid);
+        }
+
+        public static IEnumerator ClearDroppedItemsOnBattleFloor(int phase)
+        {
+            if (!NetworkServer.active) yield break;
+            FloorGenerator? floor = FindLoadedFloor(GetBattleFloorGuidForPhase(phase));
+            if (floor == null) yield break;
+
+            Vector2 center = (Vector2)floor.transform.position + floor.Center;
+            Vector2 halfSize = floor.Size * 0.5f;
+            List<GameObject> discarded = new List<GameObject>();
+            // The native discard path spawns LootableItem network objects. Scan
+            // active server objects once per phase, then destroy outside the loop.
+            foreach (NetworkIdentity identity in NetworkServer.spawned.Values)
+            {
+                if (identity == null || !identity.TryGetComponent<LootableItem>(out _)) continue;
+                Vector2 position = identity.transform.position;
+                if (Mathf.Abs(position.x - center.x) <= halfSize.x &&
+                    Mathf.Abs(position.y - center.y) <= halfSize.y)
+                    discarded.Add(identity.gameObject);
+            }
+            int cleared = 0;
+            foreach (GameObject item in discarded)
+            {
+                if (item != null)
+                {
+                    NetworkServer.Destroy(item);
+                    cleared++;
+                    if (cleared % 32 == 0) yield return null;
+                }
+            }
+            if (cleared > 0)
+                Debug.Log($"[시련] {phase}단계 시작: 전투 층의 바닥 아이템 {cleared}개 정리");
         }
 
         private static void RegisterTrialFloorObject(FloorGenerator? floor, GameObject? obj)
@@ -2636,6 +2739,8 @@ namespace SephiriaTrial
             {
                 // Keep the consumed props and merchant stock on this live floor.
                 // Recreate its return portal if a transition removed it.
+                CaptureTrialRewardFloorContents();
+                RestoreTrialRewardFloorContents(rewardPhase, generator);
                 SpawnRewardToBattlePortal(generator);
                 Vector3 existingCenter = GetFloorMarkerPosition(generator.guid, "ArenaCenter", generator.transform.position + (Vector3)generator.Center);
                 Vector3 existingWitch = GetFloorMarkerPosition(generator.guid, "WitchMerchant", existingCenter + new Vector3(-5f, -2f, 0f));
@@ -2647,10 +2752,12 @@ namespace SephiriaTrial
             }
             CaptureTrialMerchantRoomState();
             CaptureTrialIndividualRewardRoomState();
+            CaptureTrialRewardFloorContents();
             PreparedRewardRoomPhases[generator.guid] = rewardPhase;
             PreparedRewardRoomFloorIds[generator.guid] = generator.GetInstanceID();
             CleanupTrialMerchants();
             CleanupTrialRewards();
+            ClearTrialRewardFloorItems(generator);
             SpawnRewardToBattlePortal(generator);
 
             // A restored checkpoint already contains items obtained here. A
@@ -2686,6 +2793,16 @@ namespace SephiriaTrial
                         CaptureTrialMerchantRoomState();
                 }
                 RestoreTrialIndividualRewardRoomState(rewardPhase, generator);
+                RestoreTrialRewardFloorContents(rewardPhase, generator);
+                TrialIndividualRewardRoomState? savedRewards = ReadTrialIndividualRewardRoomState(rewardPhase);
+                if (savedRewards?.sources?.Any(source => source.propId == "TabletMixWithCost") != true)
+                {
+                    if (savedRewards == null) BeginTrialIndividualRewardRoomState(rewardPhase);
+                    Vector3 mixerMerchant = GetFloorMarkerPosition(generator.guid, "Merchant",
+                        generator.transform.position + (Vector3)generator.Center + new Vector3(-5f, 2f, 0f));
+                    SpawnTrialPaidTabletMixer(mixerMerchant + new Vector3(-3f, 0f, 0f), rewardPhase, generator);
+                    CaptureTrialIndividualRewardRoomState();
+                }
                 BroadcastTrialIndividualRewardClaims(rewardPhase);
                 Debug.Log($"[시련] 저장된 {rewardPhase}단계 보상은 재지급하지 않습니다.");
                 yield break;
@@ -2699,10 +2816,12 @@ namespace SephiriaTrial
             Vector3 witch = GetFloorMarkerPosition(generator.guid, "WitchMerchant", center + new Vector3(-5f, -2f, 0f));
             SpawnTrialReward(rewardPhase, generator, rewardFallback);
             SpawnTrialMerchantByClone(merchant, rewardPhase, generator);
+            SpawnTrialPaidTabletMixer(merchant + new Vector3(-3f, 0f, 0f), rewardPhase, generator);
             SpawnTrialSupplyTerminal(merchant + new Vector3(3f, 0f, 0f), rewardPhase, generator);
             TryFulfillTrialWitchHatReservation(witch, rewardPhase, generator);
             CaptureTrialMerchantRoomState();
             CaptureTrialIndividualRewardRoomState();
+            CaptureTrialRewardFloorContents(initializingRoom: true);
             BroadcastTrialIndividualRewardClaims(rewardPhase);
             Debug.Log($"[시련] 보상 층 준비 완료: {generator.guid}, phase={rewardPhase}");
         }
@@ -3094,6 +3213,8 @@ namespace SephiriaTrial
 
         private static void RestoreTrialCheckpointBeforeNativeLoad()
         {
+            _nextSavedPartyWhitelistRefresh = 0f;
+            AllowSavedTrialPartyToRejoinLobby();
             _keepRestoredTrialLobbyOpen = false;
             _restoreCheckpointPhaseOnFloorAllocation = false;
             _startupCheckpointFloorGuid = null;
@@ -3130,6 +3251,7 @@ namespace SephiriaTrial
 
         private static void RegisterRestoredTrialFloorPrefabs(bool isSavedSession)
         {
+            AllowSavedTrialPartyToRejoinLobby();
             if (!_restoreCheckpointPhaseOnFloorAllocation) return;
             foreach (string guid in TrialFloorPrefabNames.Keys)
                 TryRegisterBundledTrialFloorPrefab(guid, out _);
@@ -3230,6 +3352,7 @@ namespace SephiriaTrial
             {
                 CaptureTrialMerchantRoomState();
                 CaptureTrialIndividualRewardRoomState();
+                CaptureTrialRewardFloorContents();
                 string battleGuid = PlayerSpawner.MultiplayerList
                     .Where(player => player != null && player.PlayerAvatar != null)
                     .Select(player => player.PlayerAvatar.currentFloorGuid)
@@ -3694,16 +3817,20 @@ namespace SephiriaTrial
             }
         }
 
-        private static Vector3 GetNextRewardPosition(FloorGenerator floor, ref int slot, string dedicatedMarker, Vector3 fallback)
+        private static Vector3 GetTrialRewardPosition(FloorGenerator floor, string markerName, Vector3 fallback)
         {
-            slot++;
-            if (!string.IsNullOrEmpty(dedicatedMarker))
-            {
-                Transform? dedicated = FindBundledTrialMarker(floor, dedicatedMarker);
-                if (dedicated != null) return dedicated.position;
-            }
-            Transform? marker = FindBundledTrialMarker(floor, "Reward_" + slot.ToString(CultureInfo.InvariantCulture));
+            Transform? marker = FindBundledTrialMarker(floor, markerName);
             return marker != null ? marker.position : fallback;
+        }
+
+        private static int GetTrialRandomRewardCount(int phase)
+        {
+            if (phase < 10 || phase % 10 != 0) return 0;
+            if (phase < 30) return 1;
+            if (phase < 50) return 2;
+            if (phase < 60) return 3;
+            if (phase < 70) return 4;
+            return 5;
         }
 
         private static Vector3[] GetTrialPotionBoxOffsets(int playerCount)
@@ -3728,26 +3855,26 @@ namespace SephiriaTrial
         {
             if (!NetworkServer.active) return;
 
-            int rewardSlot = 0;
-            Vector3 boxPos = GetNextRewardPosition(floor, ref rewardSlot, "RewardPotionBoxPosition", fallbackBasePos);
-            List<int> rewardboxPool = new List<int> { 28, 29, 30, 31, 32, 33, 34, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51 };
+            Vector3 boxPos = GetTrialRewardPosition(floor, "RewardPotionBoxPosition", fallbackBasePos);
             // Keep the selected save slot's party size across reconnects.
-            foreach (Vector3 offset in GetTrialPotionBoxOffsets(ActiveTrialPartyGuids.Count))
-                CreateCustomRewardBox("RewardBox_MP", boxPos + offset, rewardboxPool, floor);
+            Vector3[] potionOffsets = GetTrialPotionBoxOffsets(ActiveTrialPartyGuids.Count);
+            for (int slot = 0; slot < potionOffsets.Length; slot++)
+                CreateCustomRewardBox("RewardBox_MP", boxPos + potionOffsets[slot],
+                    TrialPotionRewardItemIds, floor, phase, slot);
 
-            // Keep the existing special-reward list, but make the larger utility drop
-            // a milestone reward rather than a repeated reward after every boss.
+            // Utility rewards use dedicated XML markers, leaving Reward_1 through
+            // Reward_5 for the random rewards at ten-stage milestones.
             if (phase % 10 == 0)
             {
-                SpawnFromDatabase("InventoryOrb", GetNextRewardPosition(floor, ref rewardSlot, "RewardInventoryOrbPosition",
+                SpawnFromDatabase("InventoryOrb", GetTrialRewardPosition(floor, "RewardInventoryOrbPosition",
                     boxPos + new Vector3(-2.5f, 0f, 0f)), floor, phase);
             }
 
             // Use the game's FloorGenerator.CreateProp route, not a copied
             // prefab. The native Anvil component keeps its per-player enhanced
             // hash list and disables interaction for a player already at max.
-            if (phase % 10 == 0)
-                SpawnNativeTrialAnvil(GetNextRewardPosition(floor, ref rewardSlot, "RewardAnvilPosition",
+            if (phase % 10 == 0 && ShouldSpawnTrialAnvil())
+                SpawnNativeTrialAnvil(GetTrialRewardPosition(floor, "RewardAnvilPosition",
                     boxPos + new Vector3(2.5f, 0f, 0f)), floor, phase);
 
             List<string> rewardPool = new List<string> { 
@@ -3755,16 +3882,20 @@ namespace SephiriaTrial
                 "SephiriteSpawner-StoneTablet", "SephiriteSpawner-Charm", 
                 "MaxHPDispenser", "MiracleSelector", "Obelisk" 
             };
-            if (phase % 10 == 0)
+            int randomRewardCount = GetTrialRandomRewardCount(phase);
+            for (int rewardSlot = 1; rewardSlot <= randomRewardCount; rewardSlot++)
             {
                 string selectedReward = rewardPool[UnityEngine.Random.Range(0, rewardPool.Count)];
-                SpawnFromDatabase(selectedReward, GetNextRewardPosition(floor, ref rewardSlot, string.Empty,
-                    boxPos + new Vector3(0f, -3f, 0f)), floor, phase);
+                string markerName = "Reward_" + rewardSlot.ToString(CultureInfo.InvariantCulture);
+                Vector3 fallback = boxPos + new Vector3((rewardSlot - 3) * 5f, 3f, 0f);
+                SpawnFromDatabase(selectedReward, GetTrialRewardPosition(floor, markerName, fallback),
+                    floor, phase, sourceId: markerName);
             }
             PlayRewardSound(boxPos);
         }
 
-        private static void CreateCustomRewardBox(string propId, Vector3 position, List<int> itemIDPool, FloorGenerator floor)
+        private static void CreateCustomRewardBox(string propId, Vector3 position, List<int> itemIDPool,
+            FloorGenerator floor, int phase, int slot, int? restoredRandomId = null)
         {
             PropEntity? entity = PropDatabase.FindPropById(propId);
             if (entity == null || entity.propPrefab == null) return;
@@ -3780,9 +3911,12 @@ namespace SephiriaTrial
                     if (item != null) customDrops.Add(new BreakableProp.DropItemData { entity = item, quantity = 1 });
                 }
                 prop.droppableItems = customDrops.ToArray();
-                prop.SetRandomID(UnityEngine.Random.Range(int.MinValue, int.MaxValue));
+                prop.SetRandomID(restoredRandomId ?? UnityEngine.Random.Range(int.MinValue, int.MaxValue));
             }
 
+            TrialPotionBoxMarker marker = boxObj.AddComponent<TrialPotionBoxMarker>();
+            marker.phase = phase;
+            marker.slot = slot;
             NetworkServer.Spawn(boxObj);
             RegisterTrialFloorObject(floor, boxObj);
             SpawnedRewards.Add(boxObj);
@@ -3793,8 +3927,17 @@ namespace SephiriaTrial
             return NetworkServer.active && SaveTrialSnapshot(phase, displayPhase, saveCurrentRun: true);
         }
 
+        public static bool IsTrialCheckpointReadyForNextPhase(int phase)
+        {
+            if (_activeTrialSlot == 0 || !_trialSlotWriteTask.IsCompleted || _trialSlotWriteTask.IsFaulted)
+                return false;
+            if (_activeTrialSlot == 1 && ReferenceEquals(GetTrialSlotReadData(1), SaveManager.Current))
+                return IsTrialSlotSaved(1); // Legacy single-slot checkpoint.
+            return VerifyTrialSlotFile(_activeTrialSlot, phase);
+        }
+
         private static GameObject? SpawnFromDatabase(string propId, Vector3 pos, FloorGenerator floor,
-            int phase, TrialIndividualRewardSourceState? restored = null)
+            int phase, TrialIndividualRewardSourceState? restored = null, string? sourceId = null)
         {
             PropEntity? entity = PropDatabase.FindPropById(propId);
             if (entity?.propPrefab == null) return null;
@@ -3802,7 +3945,8 @@ namespace SephiriaTrial
             int randomId = restored?.randomId ?? UnityEngine.Random.Range(int.MinValue, int.MaxValue);
             foreach (IRandomID randomizable in obj.GetComponents<IRandomID>())
                 randomizable.SetRandomID(randomId);
-            RegisterTrialIndividualRewardSource(obj, phase, propId, randomId);
+            string rewardSourceId = restored != null ? GetRewardSourceId(restored) : sourceId ?? propId;
+            RegisterTrialIndividualRewardSource(obj, phase, propId, randomId, rewardSourceId);
             NetworkServer.Spawn(obj);
             if (restored != null)
             {
@@ -3812,7 +3956,7 @@ namespace SephiriaTrial
             RegisterTrialFloorObject(floor, obj);
             SpawnedRewards.Add(obj);
             if (obj.GetComponent<SephiriteSpawner>() != null)
-                ObserveTrialSephiriteRewards(obj, phase, propId);
+                ObserveTrialSephiriteRewards(obj, phase, rewardSourceId);
             return obj;
         }
 
@@ -3907,6 +4051,27 @@ namespace SephiriaTrial
             if (phase >= 51) pool.AddRange(Pool_Tier51);
             if (phase >= 101) pool.AddRange(Pool_Tier101);
             return pool;
+        }
+
+        private static bool ShouldSpawnTrialAnvil()
+        {
+            if (!NetworkServer.active) return false;
+            int maxEnhancedPlayers = 0;
+            foreach (NetworkConnectionToClient connection in NetworkServer.connections.Values)
+            {
+                if (connection?.identity == null) continue;
+                PlayerAvatar? avatar = connection.identity.GetComponent<PlayerAvatar>();
+                if (avatar == null || avatar.localDataStorage.randomWeaponOnStart) continue;
+                WeaponControllerSimple? weapons = connection.identity.GetComponent<WeaponControllerSimple>();
+                if (weapons?.currentWeapon == null) continue;
+                WeaponEntity? weapon = WeaponDatabase.FindWeaponById(weapons.currentWeapon.entityId);
+                if (weapon != null)
+                {
+                    List<EnhancementMetadata>? enhancements = WeaponDatabase.GetWeaponEnhancements(weapon.id);
+                    if (enhancements == null || enhancements.Count == 0) maxEnhancedPlayers++;
+                }
+            }
+            return maxEnhancedPlayers < PlayerSpawner.MultiplayerList.Count;
         }
 
         private static List<string> GetFilteredTrialMonsterPool(int phase)
@@ -4024,7 +4189,9 @@ namespace SephiriaTrial
 
             float baseHp = av.NetworkmaxHp;
 
-            float finalHp = baseHp + (baseHp * mult / 10f);
+            int bracket = Mathf.Max(0, (phase - 1) / 30);
+            float finalHp = (baseHp + (baseHp * mult / 10f)) *
+                (1f + bracket * TrialHealthIncreasePerBracket);
             if (isMiniBoss)
             {
                 // A modest extra health layer keeps bosses distinct from the normal
@@ -4040,10 +4207,14 @@ namespace SephiriaTrial
             // Regular enemies keep the existing spawn chance. Mini bosses only
             // receive this trial-granted super armor from phase 25 onward.
             // Armor activated by a monster's native combat pattern is separate.
-            if ((!isMiniBoss || phase >= 25) && UnityEngine.Random.value < TrialMonsterSpawnSuperArmorChance)
-                av.TurnOnSuperArmor(Mathf.Max(1f, finalHp * 0.25f));
+            float armorChance = Mathf.Min(0.9f,
+                TrialMonsterSpawnSuperArmorChance + bracket * TrialArmorChanceIncreasePerBracket);
+            if ((!isMiniBoss || phase >= 25) && UnityEngine.Random.value < armorChance)
+                av.TurnOnSuperArmor(Mathf.Max(1f, finalHp * 0.25f *
+                    (1f + bracket * TrialArmorStrengthIncreasePerBracket)));
 
-            av.AddCustomStat(ECustomStat.AllDamageBonus, phase * 15);
+            av.AddCustomStat(ECustomStat.AllDamageBonus,
+                phase * (15 + bracket * TrialDamageBonusIncreasePerBracket));
             av.AddCustomStat(ECustomStat.AttackSpeed, phase * 5);
             av.AddCustomStat(ECustomStat.DamageReduction, phase * 1);
 
@@ -4275,7 +4446,7 @@ namespace SephiriaTrial
             }
         }
 
-        public static void SpawnTrialDummies()
+        public static void SpawnTrialDummies(FloorGenerator? floor = null)
         {
             if (!NetworkServer.active) return;
             ClearTrialDummies();
@@ -4283,7 +4454,7 @@ namespace SephiriaTrial
             // TrialRoutine increments CurrentPhase before it places the dummies.
             // They are still in the just-cleared battle floor until the next stage
             // begins, so bind them to the previous phase's floor at milestone edges.
-            FloorGenerator? floor = FindLoadedFloor(GetBattleFloorGuidForPhase(
+            floor ??= FindLoadedFloor(GetBattleFloorGuidForPhase(
                 Mathf.Max(1, (TrialController.Instance?.CurrentPhase ?? 1) - 1)));
             if (floor == null)
             {
@@ -4291,7 +4462,9 @@ namespace SephiriaTrial
                 return;
             }
 
-            Vector3[] positions = new Vector3[] { TrialAnchorPosition + new Vector3(-11f, -6f, 0f), TrialAnchorPosition + new Vector3(10f, -6f, 0f) };
+            Transform? centerMarker = FindBundledTrialMarker(floor, "ArenaCenter");
+            Vector3 center = centerMarker != null ? centerMarker.position : floor.transform.position + (Vector3)floor.Center;
+            Vector3[] positions = { center + new Vector3(-11f, -6f, 0f), center + new Vector3(10f, -6f, 0f) };
             var field = typeof(AvatarSpawnDatabase).GetField("spawnEntities", BindingFlags.NonPublic | BindingFlags.Static);
             var db = field?.GetValue(null) as Dictionary<string, AvatarSpawnEntity>;
 
@@ -4303,6 +4476,10 @@ namespace SephiriaTrial
                     if (prefab == null) continue;
 
                     GameObject dummy = UnityEngine.Object.Instantiate(prefab, pos, Quaternion.identity);
+                    dummy.SetActive(true);
+                    int randomId = UnityEngine.Random.Range(int.MinValue, int.MaxValue);
+                    foreach (IRandomID randomizable in dummy.GetComponents<IRandomID>())
+                        randomizable.SetRandomID(randomId);
                     UnitAvatar? av = dummy.GetComponent<UnitAvatar>();
 
                     if (av != null)
@@ -4656,6 +4833,35 @@ namespace SephiriaTrial
             }
         }
 
+        private static void SpawnTrialPaidTabletMixer(Vector3 position, int phase, FloorGenerator floor,
+            TrialIndividualRewardSourceState? restored = null)
+        {
+            if (!NetworkServer.active) return;
+            GameObject? prefab = NetworkManager.singleton?.spawnPrefabs
+                .FirstOrDefault(candidate => candidate != null && candidate.name == "TabletMixWithCost");
+            if (prefab == null)
+            {
+                Debug.LogWarning("[시련] 원본 유료 석판 합성 프리팹(TabletMixWithCost)을 찾지 못했습니다.");
+                return;
+            }
+
+            GameObject mixerObject = UnityEngine.Object.Instantiate(prefab, position, Quaternion.identity);
+            TabletMix? mixer = mixerObject.GetComponent<TabletMix>();
+            if (mixer == null || mixer.mixCost <= 0)
+            {
+                Debug.LogWarning("[시련] 유료 석판 합성 프리팹의 TabletMix 또는 비용 설정이 올바르지 않습니다.");
+                UnityEngine.Object.Destroy(mixerObject);
+                return;
+            }
+            mixerObject.name = "TrialPaidMixer_Phase_" + phase;
+            int randomId = restored?.randomId ?? UnityEngine.Random.Range(int.MinValue, int.MaxValue);
+            RegisterTrialIndividualRewardSource(mixerObject, phase, "TabletMixWithCost", randomId);
+            if (restored != null) ApplyTrialIndividualRewardSourceState(mixerObject, restored);
+            NetworkServer.Spawn(mixerObject);
+            RegisterTrialFloorObject(floor, mixerObject);
+            SpawnedRewards.Add(mixerObject);
+        }
+
         // Reuse the game's real inventory-upgrade object instead of inventing a
         // parallel currency system.  InventoryShop already charges the interacting
         // player, grants the permanent INVENTORY_SLOT status, and replicates through
@@ -4664,6 +4870,9 @@ namespace SephiriaTrial
         {
             SpawnTrialSupplyTerminalRestored(position, phase, floor, null);
         }
+
+        private static int GetTrialSupplyTerminalPrice(int phase) =>
+            Mathf.Min(500 + ((phase / 5 - 1) * 500), 50000);
 
         private static void SpawnTrialSupplyTerminalRestored(Vector3 position, int phase,
             FloorGenerator? floor, TrialIndividualRewardSourceState? restored)
@@ -4698,7 +4907,7 @@ namespace SephiriaTrial
                 // available, while its cost rises slowly with each boss milestone.
                 shop.appearRate = 1f;
                 shop.storage = 1;
-                shop.price = Mathf.Min(500 + ((phase / 5 - 1) * 500), 50000);
+                shop.price = GetTrialSupplyTerminalPrice(phase);
             }
 
             NetworkServer.Spawn(terminal);
