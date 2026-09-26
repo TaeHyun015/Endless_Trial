@@ -325,6 +325,9 @@ namespace SephiriaTrial
             public int phase;
             public TrialMerchantState? regular;
             public TrialMerchantState? witch;
+            public bool collinRolled;
+            public bool collinSpawned;
+            public int collinRandomId;
         }
         private static Dictionary<string, AvatarSpawnEntity>? dbCache;
         public static readonly List<GameObject> SpawnedRewards = new List<GameObject>();
@@ -2743,7 +2746,9 @@ namespace SephiriaTrial
                 RestoreTrialRewardFloorContents(rewardPhase, generator);
                 SpawnRewardToBattlePortal(generator);
                 Vector3 existingCenter = GetFloorMarkerPosition(generator.guid, "ArenaCenter", generator.transform.position + (Vector3)generator.Center);
+                Vector3 existingMerchant = GetFloorMarkerPosition(generator.guid, "Merchant", existingCenter + new Vector3(-5f, 2f, 0f));
                 Vector3 existingWitch = GetFloorMarkerPosition(generator.guid, "WitchMerchant", existingCenter + new Vector3(-5f, -2f, 0f));
+                SpawnTrialCollinForPhase(existingMerchant + new Vector3(0f, -3f, 0f), rewardPhase, generator);
                 if (TryFulfillTrialWitchHatReservation(existingWitch, rewardPhase, generator))
                     CaptureTrialMerchantRoomState();
                 BroadcastTrialIndividualRewardClaims(rewardPhase);
@@ -2770,6 +2775,7 @@ namespace SephiriaTrial
                     Vector3 savedCenter = GetFloorMarkerPosition(generator.guid, "ArenaCenter", generator.transform.position + (Vector3)generator.Center);
                     Vector3 savedMerchant = GetFloorMarkerPosition(generator.guid, "Merchant", savedCenter + new Vector3(-5f, 2f, 0f));
                     Vector3 savedWitch = GetFloorMarkerPosition(generator.guid, "WitchMerchant", savedCenter + new Vector3(-5f, -2f, 0f));
+                    SpawnTrialCollinForPhase(savedMerchant + new Vector3(0f, -3f, 0f), rewardPhase, generator);
                     if (savedMerchants.regular != null)
                     {
                         SpawnTrialMerchantByClone(savedMerchant, rewardPhase, generator, savedMerchants.regular.randomId);
@@ -2791,6 +2797,13 @@ namespace SephiriaTrial
                     Vector3 retryWitch = GetFloorMarkerPosition(generator.guid, "WitchMerchant", retryCenter + new Vector3(-5f, -2f, 0f));
                     if (TryFulfillTrialWitchHatReservation(retryWitch, rewardPhase, generator))
                         CaptureTrialMerchantRoomState();
+                }
+                if (savedMerchants == null)
+                {
+                    Vector3 savedCenter = GetFloorMarkerPosition(generator.guid, "ArenaCenter", generator.transform.position + (Vector3)generator.Center);
+                    Vector3 savedMerchant = GetFloorMarkerPosition(generator.guid, "Merchant", savedCenter + new Vector3(-5f, 2f, 0f));
+                    SpawnTrialCollinForPhase(savedMerchant + new Vector3(0f, -3f, 0f), rewardPhase, generator);
+                    CaptureTrialMerchantRoomState();
                 }
                 RestoreTrialIndividualRewardRoomState(rewardPhase, generator);
                 RestoreTrialRewardFloorContents(rewardPhase, generator);
@@ -2816,6 +2829,7 @@ namespace SephiriaTrial
             Vector3 witch = GetFloorMarkerPosition(generator.guid, "WitchMerchant", center + new Vector3(-5f, -2f, 0f));
             SpawnTrialReward(rewardPhase, generator, rewardFallback);
             SpawnTrialMerchantByClone(merchant, rewardPhase, generator);
+            SpawnTrialCollinForPhase(merchant + new Vector3(0f, -3f, 0f), rewardPhase, generator);
             SpawnTrialPaidTabletMixer(merchant + new Vector3(-3f, 0f, 0f), rewardPhase, generator);
             SpawnTrialSupplyTerminal(merchant + new Vector3(3f, 0f, 0f), rewardPhase, generator);
             TryFulfillTrialWitchHatReservation(witch, rewardPhase, generator);
@@ -2981,6 +2995,101 @@ namespace SephiriaTrial
             return party;
         }
 
+        private static string GetSavedTrialPartySteamId(int slot, string guid, int partyIndex)
+        {
+            SaveData? data = GetTrialSlotReadData(slot);
+            if (data == null) return string.Empty;
+            string prefix = GetTrialSlotReadPrefix(slot);
+            string steamId = data.GetString(prefix + "PartySteamID" + partyIndex, string.Empty);
+            if (!string.IsNullOrEmpty(steamId)) return steamId;
+
+            // Older slots have no PartySteamID, but the native run fields do.
+            int fieldCount = data.GetInt(prefix + "FieldCount", 0);
+            var fields = new Dictionary<string, string>(StringComparer.Ordinal);
+            for (int i = 0; i < fieldCount; i++)
+            {
+                string key = data.GetString(prefix + "Key" + i, string.Empty);
+                if (key.StartsWith("Player", StringComparison.Ordinal) &&
+                    (key.EndsWith("Guid", StringComparison.Ordinal) ||
+                     key.EndsWith("SteamID", StringComparison.Ordinal)) &&
+                    data.HasKey(prefix + "Value" + i))
+                    fields[key] = data[prefix + "Value" + i]?.ToString() ?? string.Empty;
+            }
+            for (int i = 0; i < 16; i++)
+                if (fields.TryGetValue("Player" + i + "Guid", out string savedGuid) &&
+                    savedGuid == guid &&
+                    fields.TryGetValue("Player" + i + "SteamID", out steamId))
+                    return steamId;
+            return string.Empty;
+        }
+
+        private static bool TryMatchSavedTrialParty(int slot,
+            List<KeyValuePair<string, string>> connected,
+            out List<KeyValuePair<string, string>> matched,
+            out Dictionary<string, string> guidRemap)
+        {
+            matched = new List<KeyValuePair<string, string>>();
+            guidRemap = new Dictionary<string, string>(StringComparer.Ordinal);
+            List<KeyValuePair<string, string>> saved = GetTrialSlotParty(slot);
+            if (saved.Count == 0 || saved.Count != connected.Count) return false;
+
+            var usedGuids = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < saved.Count; i++)
+            {
+                KeyValuePair<string, string> member = saved[i];
+                string steamId = GetSavedTrialPartySteamId(slot, member.Key, i);
+                string currentGuid = connected.FirstOrDefault(player => player.Key == member.Key).Key;
+                if (string.IsNullOrEmpty(currentGuid))
+                {
+                    if (string.IsNullOrEmpty(steamId) || steamId == "0") return false;
+                    var matchingPlayers = NetworkServer.connections.Values
+                        .Select(connection => connection?.identity?.GetComponent<PlayerSpawner>())
+                        .Where(player => player != null && player.NetworksteamID != 0 &&
+                            player.NetworksteamID.ToString(CultureInfo.InvariantCulture) == steamId &&
+                            connected.Any(entry => entry.Key == player.playerGuid))
+                        .ToList();
+                    if (matchingPlayers.Count != 1) return false;
+                    PlayerSpawner? matchingPlayer = matchingPlayers[0];
+                    if (matchingPlayer == null) return false;
+                    currentGuid = matchingPlayer.playerGuid;
+                    guidRemap.Add(member.Key, currentGuid);
+                }
+                if (!string.IsNullOrEmpty(steamId) && steamId != "0" &&
+                    !NetworkServer.connections.Values.Any(connection =>
+                    {
+                        PlayerSpawner? player = connection?.identity?.GetComponent<PlayerSpawner>();
+                        return player != null && player.playerGuid == currentGuid &&
+                            player.NetworksteamID.ToString(CultureInfo.InvariantCulture) == steamId;
+                    })) return false;
+                if (!usedGuids.Add(currentGuid)) return false;
+                matched.Add(new KeyValuePair<string, string>(currentGuid, member.Value));
+            }
+            return true;
+        }
+
+        private static void RemapRestoredTrialPlayers(SaveData run, Dictionary<string, string> guidRemap)
+        {
+            int count = run.GetInt("SavedPlayerCount", 0);
+            for (int i = 0; i < count; i++)
+            {
+                string savedGuid = run.GetString($"Player{i}Guid", string.Empty);
+                string currentGuid = guidRemap.TryGetValue(savedGuid, out string replacement)
+                    ? replacement : savedGuid;
+                if (currentGuid != savedGuid) run.SetString($"Player{i}Guid", currentGuid);
+                PlayerSpawner? player = PlayerSpawner.MultiplayerList.FirstOrDefault(candidate =>
+                    candidate != null && candidate.playerGuid == currentGuid);
+                if (player != null) player.NetworkcurrentPlayerIdxForSave = i;
+            }
+            foreach (string key in new[] { TrialIndividualRewardRoomStateKey, TrialRewardFloorContentsKey })
+            {
+                string json = run.GetString(key, string.Empty);
+                if (string.IsNullOrEmpty(json)) continue;
+                foreach (KeyValuePair<string, string> entry in guidRemap)
+                    json = json.Replace(entry.Key, entry.Value);
+                run.SetString(key, json);
+            }
+        }
+
         private static void LoadActiveTrialParty(int slot)
         {
             ActiveTrialPartyGuids.Clear();
@@ -3044,14 +3153,18 @@ namespace SephiriaTrial
             if (connected.Count == 0) return false;
             if (IsTrialSlotSaved(slot))
             {
-                List<KeyValuePair<string, string>> saved = GetTrialSlotParty(slot);
-                if (saved.Count == 0 || saved.Count != connected.Count ||
-                    !connected.All(player => saved.Any(member => member.Key == player.Key)))
+                if (!TryMatchSavedTrialParty(slot, connected, out var matched, out _))
                 {
                     errorKey = "trial.msg.party_mismatch";
                     return false;
                 }
-                LoadActiveTrialParty(slot);
+                ActiveTrialPartyGuids.Clear();
+                ActiveTrialPartyNames.Clear();
+                foreach (KeyValuePair<string, string> player in matched)
+                {
+                    ActiveTrialPartyGuids.Add(player.Key);
+                    ActiveTrialPartyNames.Add(player.Value);
+                }
             }
             else
             {
@@ -3092,8 +3205,14 @@ namespace SephiriaTrial
             int phase = data.GetInt(prefix + "Phase", 1);
             List<KeyValuePair<string, string>> party = GetTrialSlotParty(slot);
             var connected = GetConnectedTrialParty().Select(player => player.Key).ToHashSet(StringComparer.Ordinal);
-            string names = string.Join(", ", party.Select(player => player.Value +
-                (connected.Contains(player.Key) ? " ✓" : " ○")));
+            var connectedSteamIds = PlayerSpawner.MultiplayerList
+                .Where(player => player != null && player.NetworksteamID != 0 &&
+                    connected.Contains(player.playerGuid))
+                .Select(player => player.NetworksteamID.ToString(CultureInfo.InvariantCulture))
+                .ToHashSet(StringComparer.Ordinal);
+            string names = string.Join(", ", party.Select((player, index) => player.Value +
+                (connected.Contains(player.Key) || connectedSteamIds.Contains(
+                    GetSavedTrialPartySteamId(slot, player.Key, index)) ? " ✓" : " ○")));
             return string.Format(GetSafeText("trial.slot.saved", "슬롯 {0}: {1}단계 · {2}"), slot, phase, names);
         }
 
@@ -3217,6 +3336,18 @@ namespace SephiriaTrial
         // the saved tablets and applies their effects.
         private static void RestoreTrialTabletDataFromRun(DungeonManager dungeon, SaveData run)
         {
+            // Native HorayNetworkManager.NewGame restores this table after LoadDungeon.
+            // Selecting a Trial slot inside an existing lobby skips that path.
+            dungeon.globalItemStatTable.Clear();
+            int statCount = run.GetInt("GlobalItemStatCount", 0);
+            for (int i = 0; i < statCount; i++)
+            {
+                string key = run.GetString($"GlobalItemStatCount{i}_Key", string.Empty);
+                if (!string.IsNullOrEmpty(key))
+                    dungeon.globalItemStatTable[key] =
+                        run.GetString($"GlobalItemStatCount{i}_Value", string.Empty);
+            }
+
             dungeon.customTabletConditionQuery.Clear();
             dungeon.customTabletQuery.Clear();
             dungeon.overrideTabletRotatable.Clear();
@@ -3434,6 +3565,11 @@ namespace SephiriaTrial
                 {
                     slotData.SetString(prefix + "PartyGuid" + i, ActiveTrialPartyGuids[i]);
                     slotData.SetString(prefix + "PartyName" + i, ActiveTrialPartyNames[i]);
+                    PlayerSpawner? member = PlayerSpawner.MultiplayerList.FirstOrDefault(player =>
+                        player != null && player.playerGuid == ActiveTrialPartyGuids[i]);
+                    slotData.SetString(prefix + "PartySteamID" + i,
+                        member != null && member.NetworksteamID != 0
+                            ? member.NetworksteamID.ToString(CultureInfo.InvariantCulture) : string.Empty);
                 }
                 slotData.SetBool(prefix + "Valid", value: true);
                 SaveManager.Current.SetInt(TrialActiveSlotKey, _activeTrialSlot);
@@ -3517,7 +3653,10 @@ namespace SephiriaTrial
 
             try
             {
+                if (!TryMatchSavedTrialParty(_activeTrialSlot, GetConnectedTrialParty(),
+                    out _, out var guidRemap)) return false;
                 if (!CopySavedTrialSnapshotRunFields(clearCurrentRun: true)) return false;
+                RemapRestoredTrialPlayers(SaveManager.CurrentRun, guidRemap);
                 RestoreTrialTabletDataFromRun(DungeonManager.Instance, SaveManager.CurrentRun);
                 if (EnableTrialLevelCap())
                     _trialLevelCapPendingFloorUntil = Time.unscaledTime + 30f;
@@ -4614,6 +4753,8 @@ namespace SephiriaTrial
                 obj.name == "TrialMerchant_Phase_" + phase);
             GameObject? witch = ActiveTrialMerchants.FirstOrDefault(obj => obj != null &&
                 obj.name == "TrialWitchHat_Phase_" + phase);
+            GameObject? collin = ActiveTrialMerchants.FirstOrDefault(obj => obj != null &&
+                obj.name == "TrialCollin_Phase_" + phase);
             if (regular == null && witch == null)
             {
                 FloorGenerator? floor = FindLoadedFloor(GetRewardFloorGuidForPhase(phase));
@@ -4631,8 +4772,16 @@ namespace SephiriaTrial
                 Debug.LogWarning($"[시련] {phase}단계 상인 상태를 아직 읽을 수 없어 기존 기록을 보존합니다.");
                 return;
             }
+            TrialMerchantRoomState? previous = ReadTrialMerchantRoomState(phase);
             var state = new TrialMerchantRoomState
-                { phase = phase, regular = regularState, witch = witchState };
+            {
+                phase = phase, regular = regularState, witch = witchState,
+                collinRolled = previous?.collinRolled == true,
+                collinSpawned = previous?.collinRolled == true && collin != null,
+                collinRandomId = collin != null
+                    ? collin.GetComponent<UnitAvatar>()?.RandomID ?? 0
+                    : previous?.collinRandomId ?? 0
+            };
             SaveManager.CurrentRun.SetString(TrialMerchantRoomStateKey, JsonConvert.SerializeObject(state));
         }
 
@@ -4719,6 +4868,74 @@ namespace SephiriaTrial
                 }
             }
             ActiveTrialMerchants.Add(clone);
+        }
+
+        // Native DungeonManager shuffles three traveler groups, one of which
+        // contains Collin. A single traveler encounter therefore selects him
+        // with probability 1/3. Keep each reward phase's decision in the run.
+        private static void SpawnTrialCollinForPhase(Vector3 position, int phase, FloorGenerator floor)
+        {
+            if (!NetworkServer.active || SaveManager.CurrentRun == null) return;
+            TrialMerchantRoomState state = ReadTrialMerchantRoomState(phase) ??
+                new TrialMerchantRoomState { phase = phase };
+            if (!state.collinRolled)
+            {
+                state.collinRolled = true;
+                state.collinSpawned = UnityEngine.Random.Range(0, 3) == 0 &&
+                    TrySpawnTrialCollin(position, phase, floor, out state.collinRandomId);
+                SaveManager.CurrentRun.SetString(TrialMerchantRoomStateKey,
+                    JsonConvert.SerializeObject(state));
+            }
+            else if (state.collinSpawned && !ActiveTrialMerchants.Any(obj =>
+                obj != null && obj.name == "TrialCollin_Phase_" + phase))
+                TrySpawnTrialCollin(position, phase, floor, out _, state.collinRandomId);
+        }
+
+        private static bool TrySpawnTrialCollin(Vector3 position, int phase,
+            FloorGenerator floor, out int randomId, int? savedRandomId = null)
+        {
+            randomId = savedRandomId ?? floor.seed;
+            SocialIDEntity social = SocialIDDatabase.FindByName("Traveler_Mercenary_WeaselKnight");
+            if (social == null || social.avatarPrefab == null || social.startingFaction == null)
+            {
+                Debug.LogError("[시련] 콜린 원본 SocialID 또는 프리팹을 찾지 못했습니다.");
+                return false;
+            }
+            GameObject npc = UnityEngine.Object.Instantiate(social.avatarPrefab, position, Quaternion.identity);
+            UnitAvatar? avatar = npc.GetComponent<UnitAvatar>();
+            UnitAI_NewBasic? ai = npc.GetComponent<UnitAI_NewBasic>();
+            if (avatar == null || ai == null)
+            {
+                UnityEngine.Object.Destroy(npc);
+                return false;
+            }
+            npc.name = "TrialCollin_Phase_" + phase;
+            NetworkServer.Spawn(npc);
+            avatar.SetRandomID(randomId);
+            avatar.ChangeFaction(social.startingFaction.name);
+            DungeonManager.Instance.GetStageStatBonusAtPosition(position,
+                out int bonusHp, out int bonusAtk, out int bonusDef);
+            avatar.AddMaxHpPercent(bonusHp * 1.5f);
+            avatar.AddCustomStat(ECustomStat.AllDamageBonus, (int)(bonusAtk * 1.5f));
+            avatar.AddCustomStat(ECustomStat.DamageReduction, (int)(bonusDef * 1.5f));
+            int extraPlayers = NetworkServer.connections.Count - 1;
+            if (extraPlayers > 0)
+            {
+                bool normal = avatar.monsterType == EMonsterType.Normal;
+                avatar.AddMaxHpPercent(extraPlayers * KeywordDatabase.GetConstValue(
+                    normal ? "enemyBonusHpByPlayerNumber" : "minibossBonusHpByPlayerNumber"));
+                avatar.AddCustomStat(ECustomStat.AllDamageBonus, extraPlayers * KeywordDatabase.GetConstValue(
+                    normal ? "enemyBonusDamageByPlayerNumber" : "minibossBonusDamageByPlayerNumber"));
+            }
+            avatar.HealPercent(100f);
+            ai.SetSocialID(social.name, social.aName.key, social.personality, social.alignment,
+                social.npcRole != null ? social.npcRole.name : string.Empty,
+                social.proceduralMerchantType, social.startingMoney, social.startingItems);
+            if (social.overridePeacrfulAIType) ai.peacefulAIType = social.peacefulAIType;
+            RegisterTrialFloorObject(floor, npc);
+            ActiveTrialMerchants.Add(npc);
+            Debug.Log($"[시련] 콜린 등장: phase={phase}, position={position}");
+            return true;
         }
 
         // Uses the exact SocialID and spawn path used by the game's random
