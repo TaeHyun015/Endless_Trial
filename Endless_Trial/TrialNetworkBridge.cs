@@ -23,6 +23,7 @@ namespace SephiriaTrial
         internal const byte GameOver = 6;
         internal const byte PartyDisconnected = 7;
         internal const byte VersionMismatch = 8;
+        internal const byte SummonCircleAppearance = 9;
 
         private struct ClientAction : NetworkMessage
         {
@@ -38,6 +39,7 @@ namespace SephiriaTrial
             public int phase;
             public float seconds;
             public string? text;
+            public Vector2 position;
         }
 
         private static bool serializersRegistered;
@@ -115,7 +117,8 @@ namespace SephiriaTrial
             });
         }
 
-        internal static void BroadcastNotice(byte operation, int phase = 0, float seconds = 0f, string text = "")
+        internal static void BroadcastNotice(byte operation, int phase = 0, float seconds = 0f,
+            string text = "", Vector2 position = default)
         {
             if (!NetworkServer.active) return;
             EnsureRegistered();
@@ -124,7 +127,8 @@ namespace SephiriaTrial
                 operation = operation,
                 phase = phase,
                 seconds = seconds,
-                text = text
+                text = text,
+                position = position
             };
             foreach (NetworkConnectionToClient connection in NetworkServer.connections.Values)
                 if (connection != null && connection != NetworkServer.localConnection)
@@ -232,6 +236,10 @@ namespace SephiriaTrial
                 case VersionMismatch:
                     EndlessMod.ShowTrialVersionMismatchPopup(notice.text ?? string.Empty);
                     break;
+                case SummonCircleAppearance:
+                    EndlessMod.PlayTrialSummonCircleAppearance(notice.text ?? string.Empty,
+                        notice.position, notice.phase);
+                    break;
                 default:
                     Debug.LogWarning($"[시련] 알 수 없는 서버 알림: {notice.operation}");
                     break;
@@ -263,6 +271,7 @@ namespace SephiriaTrial
             writer.WriteInt(value.phase);
             writer.WriteFloat(value.seconds);
             writer.WriteString(value.text ?? string.Empty);
+            writer.WriteVector2(value.position);
         }
 
         private static ServerNotice ReadServerNotice(NetworkReader reader)
@@ -272,7 +281,8 @@ namespace SephiriaTrial
                 operation = reader.ReadByte(),
                 phase = reader.ReadInt(),
                 seconds = reader.ReadFloat(),
-                text = reader.ReadString()
+                text = reader.ReadString(),
+                position = reader.ReadVector2()
             };
         }
     }

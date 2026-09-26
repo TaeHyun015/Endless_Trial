@@ -330,6 +330,9 @@ namespace SephiriaTrial
             public int collinRandomId;
         }
         private static Dictionary<string, AvatarSpawnEntity>? dbCache;
+        private static readonly Dictionary<string, AvatarSpawn_Apperance_SummonCurcle> TrialSummonCircleAppearances =
+            new Dictionary<string, AvatarSpawn_Apperance_SummonCurcle>();
+        private static readonly List<GameObject> LocalTrialSummonCircleAppearances = new List<GameObject>();
         public static readonly List<GameObject> SpawnedRewards = new List<GameObject>();
         public static readonly List<GameObject> ActiveDummies = new List<GameObject>();
         private static bool _cachedGameOver = false;
@@ -633,6 +636,10 @@ namespace SephiriaTrial
             _cachedTownReturnPortal = null;
             _nextTownReturnPortalSearchTime = 0f;
             ActiveTrialMonsters.Clear();
+            foreach (GameObject appearance in LocalTrialSummonCircleAppearances)
+                if (appearance != null) UnityEngine.Object.Destroy(appearance);
+            LocalTrialSummonCircleAppearances.Clear();
+            TrialSummonCircleAppearances.Clear();
             TrialMonsterRuntimeCaches.Clear();
             SpawnedRewards.Clear();
             ActiveTrialMerchants.Clear();
@@ -3888,11 +3895,70 @@ namespace SephiriaTrial
 
                 appearance.ApperanceInitialize(ai);
                 controller.StartCoroutine(appearance.Appear(ai));
+                // The native SummonCurcle.RpcCircle method is local despite its
+                // name. Other appearance classes already send real Mirror RPCs.
+                if (appearance is AvatarSpawn_Apperance_SummonCurcle)
+                    TrialNetworkBridge.BroadcastNotice(
+                        TrialNetworkBridge.SummonCircleAppearance,
+                        phase: controller.CurrentPhase,
+                        text: entity.apperance.name,
+                        position: (Vector2)monster.transform.position);
             }
             catch (Exception e)
             {
                 Debug.LogWarning($"[시련] 기본 몬스터 출현 이펙트를 적용하지 못했습니다: {e.Message}");
             }
+        }
+
+        internal static void PlayTrialSummonCircleAppearance(string appearanceName,
+            Vector2 position, int phase)
+        {
+            if (!NetworkClient.active || NetworkServer.active ||
+                string.IsNullOrEmpty(appearanceName) || TrialController.Instance == null)
+                return;
+            PlayerAvatar? observer = GameCamera.Instance?.Observer;
+            if (observer == null || observer.currentFloorGuid != GetBattleFloorGuidForPhase(phase))
+                return;
+            TrialController.Instance.StartCoroutine(
+                PlayTrialSummonCircleAppearanceAfterNativeDelay(appearanceName, position));
+        }
+
+        private static IEnumerator PlayTrialSummonCircleAppearanceAfterNativeDelay(
+            string appearanceName, Vector2 position)
+        {
+            yield return new WaitForSeconds(0.1f);
+            if (!NetworkClient.active) yield break;
+
+            if (!TrialSummonCircleAppearances.TryGetValue(appearanceName, out var appearance) ||
+                appearance == null)
+            {
+                appearance = null;
+                foreach (NetworkIdentity identity in NetworkClient.spawned.Values)
+                {
+                    if (identity == null ||
+                        (identity.name != appearanceName &&
+                         !identity.name.StartsWith(appearanceName + "(", StringComparison.Ordinal)))
+                        continue;
+                    appearance = identity.GetComponent<AvatarSpawn_Apperance_SummonCurcle>();
+                    if (appearance != null) break;
+                }
+                if (appearance == null)
+                {
+                    GameObject prefab = Resources.Load<GameObject>(
+                        "AvatarApperance/" + appearanceName);
+                    if (prefab == null) yield break;
+                    GameObject localAppearance = UnityEngine.Object.Instantiate(prefab);
+                    appearance = localAppearance.GetComponent<AvatarSpawn_Apperance_SummonCurcle>();
+                    if (appearance == null)
+                    {
+                        UnityEngine.Object.Destroy(localAppearance);
+                        yield break;
+                    }
+                    LocalTrialSummonCircleAppearances.Add(localAppearance);
+                }
+                TrialSummonCircleAppearances[appearanceName] = appearance;
+            }
+            appearance.RpcCircle(position);
         }
 
         public static IEnumerator CheckAndSpawnBoss(int phase, float statMult, int maxConcurrentMonsters)
