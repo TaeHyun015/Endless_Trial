@@ -24,7 +24,7 @@ namespace SephiriaTrial
         private bool localBattleUiClosedForCurrentLife;
         private readonly HashSet<int> deadMonsterIds = new HashSet<int>();
         // RandomEnemyPhaseSpawner.MultiplayerLimit in the original game.
-        private static readonly int[] ConcurrentMonsterLimits = { 53, 53, 63, 73, 73, 83, 93, 103, 113 };
+        private static readonly int[] ConcurrentMonsterLimits = { 73, 73, 83, 93, 93, 103, 113, 123, 133 };
         public bool IsTrialRunning => isTrialRunning;
         public int AliveMonsterCount => aliveMonsterCount;
 

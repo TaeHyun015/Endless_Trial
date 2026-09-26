@@ -225,7 +225,7 @@ namespace SephiriaTrial
         private const string TrialActiveSlotKey = "EndlessTrialActiveSlot";
         private const string TrialRewardIssuedPhaseKey = "EndlessTrialRewardIssuedPhase";
         private static readonly List<int> TrialPotionRewardItemIds = new List<int>
-            { 28, 29, 30, 31, 32, 33, 34, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51 };
+            { 28, 29, 30, 31, 32, 33, 34, 38, 39, 40, 41, 42, 43, 44, 45, 47, 48, 49, 50, 51 };
         private const string TrialMerchantRoomStateKey = "EndlessTrialMerchantRoomState";
         private const string TrialIndividualRewardRoomStateKey = "EndlessTrialIndividualRewardRoomState";
         private const string TrialWitchHatPendingKey = "EndlessTrialWitchHatPending";
@@ -3211,6 +3211,54 @@ namespace SephiriaTrial
             return true;
         }
 
+        // The native LoadDungeon path rebuilds these SyncDictionaries from CurrentRun.
+        // Slot selection restores CurrentRun inside an already loaded lobby, so that
+        // native load path does not run again before PlayerSpawner.Initialize creates
+        // the saved tablets and applies their effects.
+        private static void RestoreTrialTabletDataFromRun(DungeonManager dungeon, SaveData run)
+        {
+            dungeon.customTabletConditionQuery.Clear();
+            dungeon.customTabletQuery.Clear();
+            dungeon.overrideTabletRotatable.Clear();
+            dungeon.overrideItemName.Clear();
+
+            int count = run.GetInt("CustomTabletConditionQueryCount", 0);
+            for (int i = 0; i < count; i++)
+            {
+                int instanceId = run.GetInt($"CustomTabletConditionQuery{i}_InstanceID", -1);
+                if (instanceId >= 0)
+                    dungeon.customTabletConditionQuery[instanceId] =
+                        run.GetString($"CustomTabletConditionQuery{i}_Query", string.Empty);
+            }
+
+            count = run.GetInt("CustomTabletQueryCount", 0);
+            for (int i = 0; i < count; i++)
+            {
+                int instanceId = run.GetInt($"CustomTabletQuery{i}_InstanceID", -1);
+                if (instanceId >= 0)
+                    dungeon.customTabletQuery[instanceId] =
+                        run.GetString($"CustomTabletQuery{i}_Query", string.Empty);
+            }
+
+            count = run.GetInt("OverrideTabletRotatableCount", 0);
+            for (int i = 0; i < count; i++)
+            {
+                int instanceId = run.GetInt($"OverrideTabletRotatable{i}_InstanceID", -1);
+                if (instanceId >= 0)
+                    dungeon.overrideTabletRotatable[instanceId] =
+                        run.GetBool($"OverrideTabletRotatable{i}_Rotatable", fallback: false);
+            }
+
+            count = run.GetInt("OverrideItemNameCount", 0);
+            for (int i = 0; i < count; i++)
+            {
+                int instanceId = run.GetInt($"OverrideItemName{i}_InstanceID", -1);
+                if (instanceId >= 0)
+                    dungeon.overrideItemName[instanceId] =
+                        run.GetString($"OverrideItemName{i}_Name", string.Empty);
+            }
+        }
+
         private static void RestoreTrialCheckpointBeforeNativeLoad()
         {
             _nextSavedPartyWhitelistRefresh = 0f;
@@ -3470,6 +3518,7 @@ namespace SephiriaTrial
             try
             {
                 if (!CopySavedTrialSnapshotRunFields(clearCurrentRun: true)) return false;
+                RestoreTrialTabletDataFromRun(DungeonManager.Instance, SaveManager.CurrentRun);
                 if (EnableTrialLevelCap())
                     _trialLevelCapPendingFloorUntil = Time.unscaledTime + 30f;
 
