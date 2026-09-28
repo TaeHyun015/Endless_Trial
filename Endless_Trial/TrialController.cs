@@ -448,21 +448,20 @@ namespace SephiriaTrial
             deadMonsterIds.Clear();
             aliveMonsterCount = 0;
 
-            int spawnCount = 25 + (CurrentPhase - 1);
-            float statMult = 1f + (CurrentPhase - 1) * 2f;
+            int spawnCount = EndlessMod.GetTrialMonsterCount(CurrentPhase);
             int playerIndex = Mathf.Clamp(PlayerSpawner.MultiplayerList.Count - 1, 0, ConcurrentMonsterLimits.Length - 1);
             int maxConcurrentMonsters = ConcurrentMonsterLimits[playerIndex];
             WaitForSeconds spawnDelay = new WaitForSeconds(0.2f);
             WaitForSeconds deathDelay = new WaitForSeconds(0.5f);
 
-            yield return EndlessMod.CheckAndSpawnBoss(CurrentPhase, statMult, maxConcurrentMonsters);
+            yield return EndlessMod.CheckAndSpawnBoss(CurrentPhase, maxConcurrentMonsters);
 
             for (int i = 0; i < spawnCount; i++)
             {
                 // Match the original spawner: wait for a living monster to die
                 // before admitting another, rather than reducing the wave size.
                 while (aliveMonsterCount >= maxConcurrentMonsters) yield return null;
-                if (EndlessMod.SpawnMonster(statMult))
+                if (EndlessMod.SpawnMonster())
                     aliveMonsterCount++;
                 yield return spawnDelay;
             }

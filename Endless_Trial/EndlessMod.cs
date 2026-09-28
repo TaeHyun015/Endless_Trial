@@ -273,12 +273,6 @@ namespace SephiriaTrial
         private const float TrialMonsterHardRecoveryDistance = 2f;
         private const float TrialMonsterHardRecoveryDelay = 1f;
         private const float TrialMonsterSpawnSuperArmorChance = 0.30f;
-        // Every 30 phases raises the wave's difficulty without changing the
-        // first bracket's existing stats.
-        private const float TrialHealthIncreasePerBracket = 0.75f;
-        private const float TrialArmorChanceIncreasePerBracket = 0.12f;
-        private const float TrialArmorStrengthIncreasePerBracket = 0.5f;
-        private const int TrialDamageBonusIncreasePerBracket = 10;
         // The original dungeon's region-weighted random-room selection averages
         // roughly 0.8-0.9% for WitchHat. Roll once after each cleared phase and
         // reserve a single visit for the next reward room.
@@ -370,6 +364,7 @@ namespace SephiriaTrial
         private static readonly List<string> Pool_Tier41 = new List<string> { "LibraryDrone", "LibraryDrone(S)", "LibraryGargoyle", "LibraryGargoyle(S)", "LibraryGargoyle_Winged", "LibraryGargoyle_Winged(S)", "LibraryGhost_Laser", "LibraryGhost_Laser(S)", "LibraryGhost_Melee", "LibraryGhost_Melee(S)", "LibraryGolemBall", "LibraryGolemBall(S)", "LibraryGolemCow", "LibraryGolemCow(S)", "LibraryGuardianStatue", "LibraryGuardianStatue(S)", "LibraryLivingStatue", "LibraryLivingStatue(S)", "LibraryMage", "LibraryMage(S)", "LibraryMage_WaterBolt", "LibraryMage_WaterBolt(S)", "SlimeOrange", "SlimeOrange_Big" };
         private static readonly List<string> Pool_Tier51 = new List<string> { "BoneDemon", "CannonDemon", "CannonDemon(S)", "SkeletonSoldier", "SkeletonSoldier(S)", "FanaticBuffer", "FanaticDemonSoldier", "FanaticDemonSoldier(S)", "FanaticMouse", "FanaticMouse(S)", "FanaticRabbit", "FanaticRabbit(S)" };
         private static readonly List<string> Pool_Tier101 = new List<string> { "BombDemon", "BombDemon(S)", "ChakramThrower", "ChakramThrower(S)", "CrystalDemon", "CrystalDemon(S)", "LanternDemon", "LanternDemon(S)", "SkeletonMouseMage", "EyeOfDeath", "EyeOfDeath(S)", "FanaticCat", "FanaticCat(S)", "FloatingEye_DeepCave", "FloatingEye_DeepCave(S)", "SlimeMagma", "SpikeEye(S)", "FlowerSkeleton", "FlowerSkeleton(S)", "GoatSkeletonDeepCave", "HugeSkeleton", "LizardSkeleton", "MushroomHowitzer", "MushroomHowitzer(S)", "PoisonDemon", "RootMage", "RootMage(S)" };
+        private static readonly List<string> Pool_Tier121 = new List<string> { "FanaticDemonSoldier", "FanaticDemonSoldier(S)", "QliphothTempleBall", "QliphothTempleArcher", "QliphothTempleDemonCube_2Cube", "QliphothTempleDemonCube_3Cube", "QliphothTempleFighter", "QliphothTempleFighter(S)", "QliphothTempleSwordSphereThrower", "MageDemon", "SpikeEye(S)"};
         private static readonly Dictionary<int, List<string>> FilteredTrialMonsterPools =
             new Dictionary<int, List<string>>();
         // Keep the trial's contribution to UnitAvatar.isInBattle separate from
@@ -3836,7 +3831,40 @@ namespace SephiriaTrial
             if (TrialTablet != null && TrialTablet.activeSelf) TrialTablet.SetActive(false);
         }
 
-        public static bool SpawnMonster(float statMult)
+        // Keep the wave size bounded even when the endless run passes phase 100.
+        public static int GetTrialMonsterCount(int phase)
+        {
+            float count = phase <= 100
+                ? InterpolateTrialStat(phase, 25f, 32f, 60f, 90f)
+                : 90f + (phase - 100) * 0.75f;
+            return Mathf.Clamp(Mathf.RoundToInt(count), 25, 120);
+        }
+
+        private static float InterpolateTrialStat(int phase, float atOne, float atTwenty, float atSixty, float atHundred)
+        {
+            int current = Mathf.Max(1, phase);
+            if (current <= 20) return Mathf.Lerp(atOne, atTwenty, (current - 1) / 19f);
+            if (current <= 60) return Mathf.Lerp(atTwenty, atSixty, (current - 20) / 40f);
+            if (current <= 100) return Mathf.Lerp(atSixty, atHundred, (current - 60) / 40f);
+            return ContinueTrialGrowth(current, atSixty, atHundred);
+        }
+
+        private static float ContinueTrialGrowth(int phase, float atSixty, float atHundred)
+        {
+            // Repeat the 60-to-100 ratio every forty phases, without a step at the boundary.
+            return atHundred * Mathf.Pow(atHundred / atSixty, (phase - 100) / 40f);
+        }
+
+        private static float GetTrialHealthMultiplier(int phase)
+        {
+            int current = Mathf.Max(1, phase);
+            if (current <= 20) return 1.1f * Mathf.Pow(3.25f / 1.1f, (current - 1) / 19f);
+            if (current <= 60) return 3.25f * Mathf.Pow(30f / 3.25f, (current - 20) / 40f);
+            if (current <= 100) return 30f * Mathf.Pow(180f / 30f, (current - 60) / 40f);
+            return ContinueTrialGrowth(current, 30f, 180f);
+        }
+
+        public static bool SpawnMonster()
         {
             if (!NetworkServer.active) return false;
             if (dbCache == null || dbCache.Count == 0) LoadDatabase();
@@ -3853,13 +3881,13 @@ namespace SephiriaTrial
                     if (prefab == null) return false;
 
                     Vector3 spawnPos = GetRandomSpawnPos();
-                    return SpawnMonsterWithAppearance(ent, prefab, spawnPos, statMult, phase);
+                    return SpawnMonsterWithAppearance(ent, prefab, spawnPos, phase);
                 }
             }
             return false;
         }
 
-        private static bool SpawnMonsterWithAppearance(AvatarSpawnEntity entity, GameObject prefab, Vector3 spawnPosition, float statMult, int phase, bool isMiniBoss = false, Action<GameObject>? configureBeforeSpawn = null)
+        private static bool SpawnMonsterWithAppearance(AvatarSpawnEntity entity, GameObject prefab, Vector3 spawnPosition, int phase, bool isMiniBoss = false, Action<GameObject>? configureBeforeSpawn = null)
         {
             TrialController? controller = TrialController.Instance;
             if (controller == null || !NetworkServer.active) return false;
@@ -3876,7 +3904,7 @@ namespace SephiriaTrial
             TryPlayNativeSpawnAppearance(entity, monster, controller);
             NetworkServer.Spawn(monster);
             ConstrainTrialMonsterToArena(trialAvatar);
-            controller.StartCoroutine(ApplyMonsterStatNextFrame(monster, statMult, phase, isMiniBoss));
+            controller.StartCoroutine(ApplyMonsterStatNextFrame(monster, phase, isMiniBoss));
             return true;
         }
 
@@ -3961,7 +3989,7 @@ namespace SephiriaTrial
             appearance.RpcCircle(position);
         }
 
-        public static IEnumerator CheckAndSpawnBoss(int phase, float statMult, int maxConcurrentMonsters)
+        public static IEnumerator CheckAndSpawnBoss(int phase, int maxConcurrentMonsters)
         {
             if (!NetworkServer.active || phase % 5 != 0) yield break;
 
@@ -3973,7 +4001,7 @@ namespace SephiriaTrial
                     TrialController.Instance.AliveMonsterCount >= maxConcurrentMonsters)
                     yield return null;
                 if (TrialController.Instance == null) yield break;
-                HandlePhaseBossLogic(60, statMult);
+                HandlePhaseBossLogic(60);
             }
 
             if (remaining == 0) yield break;
@@ -3983,36 +4011,36 @@ namespace SephiriaTrial
             while (TrialController.Instance != null &&
                 TrialController.Instance.AliveMonsterCount > maxConcurrentMonsters - groupSize)
                 yield return null;
-            if (TrialController.Instance != null) HandlePhaseBossLogic(remaining, statMult);
+            if (TrialController.Instance != null) HandlePhaseBossLogic(remaining);
         }
 
-        private static void HandlePhaseBossLogic(int phase, float statMult)
+        private static void HandlePhaseBossLogic(int phase)
         {
             switch (phase)
             {
-                case 5: SpawnSpecificBosses("GoatSkeleton", 1, statMult); break;
-                case 10: SpawnSpecificBosses("GoatSkeleton", 2, statMult); break;
-                case 15: SpawnSpecificBosses("GoatSkeleton", 3, statMult); break;
-                case 20: SpawnSpecificBosses("GoatSkeleton", 2, statMult); SpawnSpecificBosses("PantherRogue", 1, statMult); break;
-                case 25: SpawnSpecificBosses("GoatSkeleton", 1, statMult); SpawnSpecificBosses("PantherRogue", 2, statMult); break;
-                case 30: SpawnSpecificBosses("PantherRogue", 3, statMult); break;
-                case 35: SpawnSpecificBosses("PantherRogue", 2, statMult); SpawnSpecificBosses("LibraryDemonBook", 1, statMult); break;
-                case 40: SpawnSpecificBosses("PantherRogue", 1, statMult); SpawnSpecificBosses("LibraryDemonBook", 2, statMult); break;
-                case 45: SpawnSpecificBosses("LibraryDemonBook", 3, statMult); break;
-                case 50: SpawnSpecificBosses("LibraryDemonBook", 2, statMult); SpawnSpecificBosses("SamuraiDemon", 1, statMult); break;
-                case 55: SpawnSpecificBosses("LibraryDemonBook", 1, statMult); SpawnSpecificBosses("SamuraiDemon", 2, statMult); break;
+                case 5: SpawnSpecificBosses("GoatSkeleton", 1); break;
+                case 10: SpawnSpecificBosses("GoatSkeleton", 2); break;
+                case 15: SpawnSpecificBosses("GoatSkeleton", 3); break;
+                case 20: SpawnSpecificBosses("GoatSkeleton", 2); SpawnSpecificBosses("PantherRogue", 1); break;
+                case 25: SpawnSpecificBosses("GoatSkeleton", 1); SpawnSpecificBosses("PantherRogue", 2); break;
+                case 30: SpawnSpecificBosses("PantherRogue", 3); break;
+                case 35: SpawnSpecificBosses("PantherRogue", 2); SpawnSpecificBosses("LibraryDemonBook", 1); break;
+                case 40: SpawnSpecificBosses("PantherRogue", 1); SpawnSpecificBosses("LibraryDemonBook", 2); break;
+                case 45: SpawnSpecificBosses("LibraryDemonBook", 3); break;
+                case 50: SpawnSpecificBosses("LibraryDemonBook", 2); SpawnSpecificBosses("SamuraiDemon", 1); break;
+                case 55: SpawnSpecificBosses("LibraryDemonBook", 1); SpawnSpecificBosses("SamuraiDemon", 2); break;
                 // The actual UnitAvatar database entries for the QTemple trio.
                 // Spawn only L here; its server-side death advances the relay.
-                case 60: SpawnSixtiethPhaseBossSequence(statMult); break;
+                case 60: SpawnSixtiethPhaseBossSequence(); break;
             }
         }
 
-        private static void SpawnSixtiethPhaseBossSequence(float statMult)
+        private static void SpawnSixtiethPhaseBossSequence()
         {
-            SpawnSequencedMiniBoss("QTemple_MBTrio_L", "QTemple_MBTrio_M", statMult);
+            SpawnSequencedMiniBoss("QTemple_MBTrio_L", "QTemple_MBTrio_M");
         }
 
-        private static bool SpawnSequencedMiniBoss(string key, string nextBossKey, float statMult)
+        private static bool SpawnSequencedMiniBoss(string key, string nextBossKey)
         {
             if (dbCache == null || dbCache.Count == 0) LoadDatabase();
             if (dbCache == null || !dbCache.TryGetValue(key, out AvatarSpawnEntity? entity))
@@ -4026,7 +4054,7 @@ namespace SephiriaTrial
             if (prefab == null || controller == null) return false;
 
             bool spawned = SpawnMonsterWithAppearance(
-                entity, prefab, GetRandomSpawnPos(), statMult * 1.5f, controller.CurrentPhase, isMiniBoss: true,
+                entity, prefab, GetRandomSpawnPos(), controller.CurrentPhase, isMiniBoss: true,
                 configureBeforeSpawn: monster => monster.AddComponent<TrialBossSequenceTag>().nextBossKey = nextBossKey);
 
             if (spawned) controller.AddAliveCount();
@@ -4040,16 +4068,14 @@ namespace SephiriaTrial
             TrialBossSequenceTag? sequence = defeatedBoss.GetComponent<TrialBossSequenceTag>();
             if (sequence == null || string.IsNullOrEmpty(sequence.nextBossKey)) return false;
 
-            int phase = TrialController.Instance?.CurrentPhase ?? 60;
-            float statMult = 1f + (phase - 1) * 2f;
             string nextKey = sequence.nextBossKey;
             string followingKey = string.Equals(nextKey, "QTemple_MBTrio_M", StringComparison.Ordinal)
                 ? "QTemple_MBTrio_F"
                 : string.Empty;
-            return SpawnSequencedMiniBoss(nextKey, followingKey, statMult);
+            return SpawnSequencedMiniBoss(nextKey, followingKey);
         }
 
-        private static void SpawnSpecificBosses(string key, int count, float statMult)
+        private static void SpawnSpecificBosses(string key, int count)
         {
             if (dbCache == null || dbCache.Count == 0) LoadDatabase();
             if (dbCache == null) return;
@@ -4063,7 +4089,7 @@ namespace SephiriaTrial
                     int currentPhase = controller?.CurrentPhase ?? 1;
                     // Boss phases still use the same enemy pool, but this flag gives
                     // these units their own survivability and anti-evasion profile.
-                    if (SpawnMonsterWithAppearance(ent, prefab, GetRandomSpawnPos(), statMult * 1.5f, currentPhase, isMiniBoss: true) && controller != null)
+                    if (SpawnMonsterWithAppearance(ent, prefab, GetRandomSpawnPos(), currentPhase, isMiniBoss: true) && controller != null)
                     {
                         controller.AddAliveCount();
                     }
@@ -4139,7 +4165,11 @@ namespace SephiriaTrial
             int randomRewardCount = GetTrialRandomRewardCount(phase);
             for (int rewardSlot = 1; rewardSlot <= randomRewardCount; rewardSlot++)
             {
-                string selectedReward = rewardPool[UnityEngine.Random.Range(0, rewardPool.Count)];
+                // Phase 20 replaces its single random reward with the guaranteed miracle.
+                // Every other milestone rolls the original pool, including miracles.
+                string selectedReward = phase == 20
+                    ? "MiracleSelector"
+                    : rewardPool[UnityEngine.Random.Range(0, rewardPool.Count)];
                 string markerName = "Reward_" + rewardSlot.ToString(CultureInfo.InvariantCulture);
                 Vector3 fallback = boxPos + new Vector3((rewardSlot - 3) * 5f, 3f, 0f);
                 SpawnFromDatabase(selectedReward, GetTrialRewardPosition(floor, markerName, fallback),
@@ -4304,6 +4334,9 @@ namespace SephiriaTrial
             if (phase >= 41) pool.AddRange(Pool_Tier41);
             if (phase >= 51) pool.AddRange(Pool_Tier51);
             if (phase >= 101) pool.AddRange(Pool_Tier101);
+            if (phase >= 121)
+                foreach (string monster in Pool_Tier121)
+                    if (!pool.Contains(monster)) pool.Add(monster);
             return pool;
         }
 
@@ -4330,7 +4363,7 @@ namespace SephiriaTrial
 
         private static List<string> GetFilteredTrialMonsterPool(int phase)
         {
-            int tier = phase >= 101 ? 101 : phase >= 51 ? 51 :
+            int tier = phase >= 121 ? 121 : phase >= 101 ? 101 : phase >= 51 ? 51 :
                 phase >= 41 ? 41 : phase >= 21 ? 21 : 1;
             if (FilteredTrialMonsterPools.TryGetValue(tier, out List<string>? pool))
                 return pool;
@@ -4424,7 +4457,7 @@ namespace SephiriaTrial
             recovery.outsideSince = -1f;
         }
 
-        private static IEnumerator ApplyMonsterStatNextFrame(GameObject monster, float mult, int phase, bool isMiniBoss)
+        private static IEnumerator ApplyMonsterStatNextFrame(GameObject monster, int phase, bool isMiniBoss)
         {
             yield return null;
             if (monster == null) yield break;
@@ -4443,14 +4476,10 @@ namespace SephiriaTrial
 
             float baseHp = av.NetworkmaxHp;
 
-            int bracket = Mathf.Max(0, (phase - 1) / 30);
-            float finalHp = (baseHp + (baseHp * mult / 10f)) *
-                (1f + bracket * TrialHealthIncreasePerBracket);
+            float finalHp = baseHp * GetTrialHealthMultiplier(phase);
             if (isMiniBoss)
             {
-                // A modest extra health layer keeps bosses distinct from the normal
-                // pack without replacing the existing phase scaling curve.
-                finalHp *= 1.25f;
+                finalHp *= Mathf.Lerp(1.75f, 3.5f, Mathf.Clamp01((phase - 20f) / 80f));
             }
 
             // These native UnitAvatar setters mark Mirror's SyncVars dirty.
@@ -4458,24 +4487,25 @@ namespace SephiriaTrial
             av.NetworkmaxHp = finalHp;
             av.Networkhp = finalHp;
 
-            // Regular enemies keep the existing spawn chance. Mini bosses only
-            // receive this trial-granted super armor from phase 25 onward.
+            // Mini bosses only receive this trial-granted super armor from phase 25 onward.
             // Armor activated by a monster's native combat pattern is separate.
             float armorChance = Mathf.Min(0.9f,
-                TrialMonsterSpawnSuperArmorChance + bracket * TrialArmorChanceIncreasePerBracket);
+                TrialMonsterSpawnSuperArmorChance + (Mathf.Max(1, phase) - 1) * 0.45f / 99f);
             if ((!isMiniBoss || phase >= 25) && UnityEngine.Random.value < armorChance)
                 av.TurnOnSuperArmor(Mathf.Max(1f, finalHp * 0.25f *
-                    (1f + bracket * TrialArmorStrengthIncreasePerBracket)));
+                    (1f + Mathf.Min(2f, (Mathf.Max(1, phase) - 1) * 1.5f / 99f))));
 
-            av.AddCustomStat(ECustomStat.AllDamageBonus,
-                phase * (15 + bracket * TrialDamageBonusIncreasePerBracket));
-            av.AddCustomStat(ECustomStat.AttackSpeed, phase * 5);
-            av.AddCustomStat(ECustomStat.DamageReduction, phase * 1);
+            int damageBonus = Mathf.RoundToInt(InterpolateTrialStat(phase, 15f, 200f, 600f, 1000f));
+            int attackSpeed = Mathf.RoundToInt(InterpolateTrialStat(phase, 5f, 40f, 85f, 125f));
+            int damageReduction = Mathf.RoundToInt(InterpolateTrialStat(phase, 1f, 12f, 60f, 90f));
+            av.AddCustomStat(ECustomStat.AllDamageBonus, damageBonus);
+            av.AddCustomStat(ECustomStat.AttackSpeed, attackSpeed);
+            av.AddCustomStat(ECustomStat.DamageReduction, damageReduction);
 
             if (isMiniBoss)
             {
-                av.AddCustomStat(ECustomStat.AllDamageBonus, phase * 5);
-                av.AddCustomStat(ECustomStat.AttackSpeed, phase * 3);
+                av.AddCustomStat(ECustomStat.AllDamageBonus, Mathf.RoundToInt(damageBonus * 0.2f));
+                av.AddCustomStat(ECustomStat.AttackSpeed, Mathf.RoundToInt(attackSpeed * 0.2f));
                 av.AddCustomStat(ECustomStat.DamageReduction, 15);
                 // These are recognized by UnitAvatar's native damage calculation:
                 // 35% of a target's evasion is ignored and critical damage is cut by 30%.
